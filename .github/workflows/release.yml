@@ -68,9 +68,14 @@ jobs:
         run: |
           source /etc/os-release
           [[ -n "$VERSION_CODENAME" ]]
+          case "$(dpkg --print-architecture)" in
+            amd64) ubuntu_mirror="https://mirrors.ustc.edu.cn/ubuntu" ;;
+            arm64) ubuntu_mirror="https://mirrors.ustc.edu.cn/ubuntu-ports" ;;
+            *) echo "不支持的 Ubuntu 架构" >&2; exit 1 ;;
+          esac
           sudo tee /etc/apt/sources.list.d/ubuntu.sources >/dev/null <<EOF
           Types: deb
-          URIs: https://mirrors.ustc.edu.cn/ubuntu
+          URIs: $ubuntu_mirror
           Suites: $VERSION_CODENAME $VERSION_CODENAME-updates $VERSION_CODENAME-backports $VERSION_CODENAME-security
           Components: main restricted universe multiverse
           Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
@@ -209,9 +214,14 @@ jobs:
         run: |
           source /etc/os-release
           [[ -n "$VERSION_CODENAME" ]]
+          case "$(dpkg --print-architecture)" in
+            amd64) ubuntu_mirror="https://mirrors.ustc.edu.cn/ubuntu" ;;
+            arm64) ubuntu_mirror="https://mirrors.ustc.edu.cn/ubuntu-ports" ;;
+            *) echo "不支持的 Ubuntu 架构" >&2; exit 1 ;;
+          esac
           sudo tee /etc/apt/sources.list.d/ubuntu.sources >/dev/null <<EOF
           Types: deb
-          URIs: https://mirrors.ustc.edu.cn/ubuntu
+          URIs: $ubuntu_mirror
           Suites: $VERSION_CODENAME $VERSION_CODENAME-updates $VERSION_CODENAME-backports $VERSION_CODENAME-security
           Components: main restricted universe multiverse
           Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg

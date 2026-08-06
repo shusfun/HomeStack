@@ -19,8 +19,8 @@ Release 包含：
 先确保默认分支测试通过，再创建带说明的标签：
 
 ```bash
-git tag -a v0.1.2 -m "HomeStack v0.1.2"
-git push origin v0.1.2
+git tag -a v0.1.3 -m "HomeStack v0.1.3"
+git push origin v0.1.3
 ```
 
 工作流不创建标签，也不会覆盖已有 Release。任何矩阵任务失败时均不会发布部分产物。
@@ -31,7 +31,7 @@ git push origin v0.1.2
 
 ```bash
 GOENV=./go.env go tool wails3 task release:package \
-  COMPONENT=control VERSION=v0.1.2 GOOS=linux ARCH=amd64
+  COMPONENT=control VERSION=v0.1.3 GOOS=linux ARCH=amd64
 ```
 
 `COMPONENT` 只能是 `control`、`agent` 或 `desktop`。Control 与 Agent 只允许 Linux 目标；桌面端必须在对应操作系统原生构建。
