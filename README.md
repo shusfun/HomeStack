@@ -54,8 +54,8 @@ curl -fsSL https://raw.githubusercontent.com/shusfun/HomeStack/main/deploy/insta
 安装指定版本或升级现有服务：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/shusfun/HomeStack/main/deploy/install.sh | sudo bash -s -- upgrade control --version v0.1.1
-curl -fsSL https://raw.githubusercontent.com/shusfun/HomeStack/main/deploy/install.sh | bash -s -- upgrade agent --version v0.1.1
+curl -fsSL https://raw.githubusercontent.com/shusfun/HomeStack/main/deploy/install.sh | sudo bash -s -- upgrade control --version v0.1.2
+curl -fsSL https://raw.githubusercontent.com/shusfun/HomeStack/main/deploy/install.sh | bash -s -- upgrade agent --version v0.1.2
 ```
 
 脚本不会启动尚未完成 HTTPS、身份或设备档案配置的全新服务。Release 与本地打包说明见 [docs/release.md](docs/release.md)。

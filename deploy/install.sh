@@ -16,7 +16,7 @@ HomeStack Linux 安装器
   install.sh control
   install.sh agent
   install.sh upgrade control
-  install.sh agent --version v0.1.1
+  install.sh agent --version v0.1.2
 
 Control 需要 root；Agent 必须以最终使用者身份运行，不能使用 sudo。
 EOF
