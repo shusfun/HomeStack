@@ -2,15 +2,14 @@
 .idea/
 .vscode/
 bin/
-dist/
+/dist/
 coverage/
 node_modules/
 frontend/node_modules/
 frontend/*.tsbuildinfo
 frontend/vite.config.d.ts
 frontend/vite.config.js
-internal/web/dist/*
-!internal/web/dist/index.html
+/internal/web/dist/
 *.log
 *.pid
 *.tmp

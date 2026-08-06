@@ -63,15 +63,27 @@ jobs:
           cache: true
           cache-dependency-path: go.sum
 
+      - name: 配置 Linux 构建源与 Wails 依赖
+        shell: bash
+        run: |
+          source /etc/os-release
+          [[ -n "$VERSION_CODENAME" ]]
+          sudo tee /etc/apt/sources.list.d/ubuntu.sources >/dev/null <<EOF
+          Types: deb
+          URIs: https://mirrors.ustc.edu.cn/ubuntu
+          Suites: $VERSION_CODENAME $VERSION_CODENAME-updates $VERSION_CODENAME-backports $VERSION_CODENAME-security
+          Components: main restricted universe multiverse
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+          EOF
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc libgtk-4-dev libwebkitgtk-6.0-dev
+
       - name: 安装前端依赖
         run: pnpm install --frozen-lockfile --child-concurrency=2
 
       - name: 下载 Go 依赖
         # setup-go 以 go.sum 为指纹持久缓存 GOMODCACHE 与 GOCACHE。
         run: go mod download
-
-      - name: Go 测试
-        run: go test -p=2 -parallel=2 ./...
 
       - name: 前端类型检查
         run: pnpm --dir frontend typecheck
@@ -81,6 +93,9 @@ jobs:
 
       - name: 构建共享前端
         run: pnpm --dir frontend build
+
+      - name: Go 测试
+        run: go test -p=2 -parallel=2 ./...
 
       - name: 上传共享前端
         uses: actions/upload-artifact@v7
