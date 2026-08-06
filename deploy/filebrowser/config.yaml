@@ -1,0 +1,36 @@
+server:
+  port: 8080
+  baseURL: /
+  root: /srv/homestack-share
+  database: /var/lib/filebrowser/database.db
+  log: stdout
+  enableExec: false
+  numImageProcessors: 2
+  enableThumbnails: true
+
+auth:
+  method: password
+  signup: false
+  adminUsername: REPLACE_WITH_ADMIN_USERNAME
+  adminPassword: REPLACE_WITH_RANDOM_ADMIN_PASSWORD
+  tokenExpirationTime: 2h
+
+frontend:
+  name: HomeStack Files
+  disableDefaultLinks: true
+
+userDefaults:
+  scope: .
+  hideDotfiles: true
+  lockPassword: true
+  disableSettings: true
+  permissions:
+    api: true
+    admin: false
+    execute: false
+    create: false
+    rename: false
+    modify: false
+    delete: false
+    share: false
+    download: true

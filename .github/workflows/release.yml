@@ -1,0 +1,288 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "已存在的发布标签，例如 v0.1.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: homestack-release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  COREPACK_NPM_REGISTRY: https://registry.npmmirror.com
+  NPM_CONFIG_REGISTRY: https://registry.npmmirror.com
+  GOPROXY: https://goproxy.cn
+  GOSUMDB: sum.golang.org
+  GOENV: ./go.env
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出发布标签
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: 校验发布标签
+        shell: bash
+        run: |
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]]
+          git rev-parse --verify "refs/tags/$RELEASE_TAG^{commit}"
+
+      - name: 配置 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.32.1
+          run_install: false
+
+      - name: 配置 Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 26.6.0
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: 配置 Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: 1.26.1
+          check-latest: false
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: 安装前端依赖
+        run: pnpm install --frozen-lockfile --child-concurrency=2
+
+      - name: 下载 Go 依赖
+        # setup-go 以 go.sum 为指纹持久缓存 GOMODCACHE 与 GOCACHE。
+        run: go mod download
+
+      - name: Go 测试
+        run: go test -p=2 -parallel=2 ./...
+
+      - name: 前端类型检查
+        run: pnpm --dir frontend typecheck
+
+      - name: 前端测试
+        run: pnpm --dir frontend exec vitest run --maxWorkers=2 --minWorkers=1
+
+      - name: 构建共享前端
+        run: pnpm --dir frontend build
+
+      - name: 上传共享前端
+        uses: actions/upload-artifact@v7
+        with:
+          name: homestack-web-dist
+          path: internal/web/dist
+          retention-days: 1
+
+  linux-cli:
+    needs: verify
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - name: 检出发布标签
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: 配置 Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: 1.26.1
+          check-latest: false
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: 下载共享前端
+        uses: actions/download-artifact@v8
+        with:
+          name: homestack-web-dist
+          path: internal/web/dist
+
+      - name: 下载 Go 依赖
+        # setup-go 以 go.sum 为指纹持久缓存 GOMODCACHE 与 GOCACHE。
+        run: go mod download
+
+      - name: 打包 Control 与 Agent
+        shell: bash
+        run: |
+          chmod +x scripts/package-release.sh
+          scripts/package-release.sh control "$RELEASE_TAG" linux "${{ matrix.arch }}"
+          scripts/package-release.sh agent "$RELEASE_TAG" linux "${{ matrix.arch }}"
+
+      - name: 上传 Linux CLI 产物
+        uses: actions/upload-artifact@v7
+        with:
+          name: homestack-linux-cli-${{ matrix.arch }}
+          path: dist/*.tar.gz
+          retention-days: 1
+
+  desktop:
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            os: linux
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            os: linux
+            arch: arm64
+          - runner: windows-latest
+            os: windows
+            arch: amd64
+          - runner: windows-11-arm
+            os: windows
+            arch: arm64
+          - runner: macos-15-intel
+            os: darwin
+            arch: amd64
+          - runner: macos-15
+            os: darwin
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: 检出发布标签
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: 配置 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.32.1
+          run_install: false
+
+      - name: 配置 Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 26.6.0
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: 配置 Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: 1.26.1
+          check-latest: false
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: 配置 Linux 构建源与 Wails 依赖
+        if: matrix.os == 'linux'
+        shell: bash
+        run: |
+          source /etc/os-release
+          [[ -n "$VERSION_CODENAME" ]]
+          sudo tee /etc/apt/sources.list.d/ubuntu.sources >/dev/null <<EOF
+          Types: deb
+          URIs: https://mirrors.ustc.edu.cn/ubuntu
+          Suites: $VERSION_CODENAME $VERSION_CODENAME-updates $VERSION_CODENAME-backports $VERSION_CODENAME-security
+          Components: main restricted universe multiverse
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+          EOF
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc libgtk-4-dev libwebkitgtk-6.0-dev
+
+      - name: 安装前端依赖
+        shell: bash
+        run: pnpm install --frozen-lockfile --child-concurrency=2
+
+      - name: 下载 Go 依赖
+        # setup-go 以 go.sum 为指纹持久缓存 GOMODCACHE 与 GOCACHE。
+        shell: bash
+        run: go mod download
+
+      - name: 构建共享前端
+        shell: bash
+        run: pnpm --dir frontend build
+
+      - name: 打包桌面端
+        shell: bash
+        run: |
+          chmod +x scripts/package-release.sh
+          scripts/package-release.sh desktop "$RELEASE_TAG" "${{ matrix.os }}" "${{ matrix.arch }}"
+
+      - name: 上传桌面端产物
+        uses: actions/upload-artifact@v7
+        with:
+          name: homestack-desktop-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/*.tar.gz
+          retention-days: 1
+
+  publish:
+    needs: [linux-cli, desktop]
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出发布标签
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: 下载 Linux CLI 产物
+        uses: actions/download-artifact@v8
+        with:
+          pattern: homestack-linux-cli-*
+          path: dist
+          merge-multiple: true
+
+      - name: 下载桌面端产物
+        uses: actions/download-artifact@v8
+        with:
+          pattern: homestack-desktop-*
+          path: dist
+          merge-multiple: true
+
+      - name: 生成 SHA-256 清单
+        shell: bash
+        run: |
+          cd dist
+          sha256sum *.tar.gz > checksums.txt
+
+      - name: 创建 GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > release-notes.md <<EOF
+          HomeStack $RELEASE_TAG
+
+          Linux Control 一键安装：
+
+          \`\`\`bash
+          curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/deploy/install.sh | sudo bash -s -- control --version "$RELEASE_TAG"
+          \`\`\`
+
+          Linux Agent 一键安装：
+
+          \`\`\`bash
+          curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/deploy/install.sh | bash -s -- agent --version "$RELEASE_TAG"
+          \`\`\`
+
+          所有下载必须使用本 Release 中的 \`checksums.txt\` 校验。桌面端当前为未经过商业证书签名的测试发布包。
+          EOF
+          gh release create "$RELEASE_TAG" dist/* \
+            --verify-tag \
+            --title "HomeStack ${RELEASE_TAG#v}" \
+            --notes-file release-notes.md

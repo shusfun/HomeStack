@@ -1,0 +1,29 @@
+[Unit]
+Description=HomeStack public control service
+After=network-online.target pocket-id.service headscale.service
+Wants=network-online.target
+Requires=pocket-id.service headscale.service
+
+[Service]
+Type=simple
+User=homestack-control
+Group=homestack-control
+SupplementaryGroups=headscale
+EnvironmentFile=/etc/homestack/control.env
+ExecStart=/usr/local/bin/homestack-control
+Restart=on-failure
+RestartSec=5s
+StateDirectory=homestack-control
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

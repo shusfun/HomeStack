@@ -1,0 +1,34 @@
+version: "3"
+
+vars:
+  APP_NAME: homestack-desktop
+
+tasks:
+  build:
+    cmds:
+      - pnpm --dir frontend build
+      - GOENV=./go.env go build -o ./bin/{{.APP_NAME}} ./cmd/homestack-desktop
+
+  run:
+    deps: [build]
+    cmds:
+      - ./bin/{{.APP_NAME}}
+
+  dev:
+    cmds:
+      - GOENV=./go.env go tool wails3 dev -config ./build/config.yml
+
+  contract:
+    cmds:
+      - GOENV=./go.env go test -p=2 -parallel=2 -tags=contract ./internal/contracts
+
+  release:check:
+    cmds:
+      - bash -n ./deploy/install.sh
+      - bash -n ./scripts/package-release.sh
+
+  release:package:
+    requires:
+      vars: [COMPONENT, VERSION, GOOS, ARCH]
+    cmds:
+      - ./scripts/package-release.sh "{{.COMPONENT}}" "{{.VERSION}}" "{{.GOOS}}" "{{.ARCH}}"

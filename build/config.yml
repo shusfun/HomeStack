@@ -1,0 +1,32 @@
+version: "3"
+
+info:
+  companyName: "HomeStack"
+  productName: "HomeStack"
+  productIdentifier: "dev.homestack.desktop"
+  description: "多端 NAS 与远程开发整合器"
+  copyright: "Copyright 2026 HomeStack"
+  version: "0.1.0"
+
+dev_mode:
+  root_path: .
+  log_level: info
+  debounce: 800
+  ignore:
+    dir:
+      - .git
+      - bin
+      - frontend/node_modules
+      - internal/web/dist
+    file:
+      - .DS_Store
+  watched_extension:
+    - "*.go"
+  git_ignore: true
+  executes:
+    - cmd: pnpm --dir frontend dev
+      type: background
+    - cmd: go build -o ./bin/homestack-desktop ./cmd/homestack-desktop
+      type: blocking
+    - cmd: ./bin/homestack-desktop
+      type: primary

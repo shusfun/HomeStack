@@ -1,0 +1,18 @@
+{
+  "name": "homestack",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@10.32.1",
+  "engines": {
+    "node": "26.6.0",
+    "pnpm": "10.32.1"
+  },
+  "scripts": {
+    "build": "pnpm --dir frontend build",
+    "dev": "pnpm --dir frontend dev",
+    "typecheck": "pnpm --dir frontend typecheck",
+    "test": "pnpm --dir frontend test",
+    "wails:dev": "GOENV=./go.env go tool wails3 dev -config ./build/config.yml",
+    "wails:build": "pnpm build && GOENV=./go.env go build -o ./bin/homestack-desktop ./cmd/homestack-desktop"
+  }
+}
