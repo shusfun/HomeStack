@@ -1,8 +1,8 @@
 [Unit]
 Description=HomeStack public control service
-After=network-online.target pocket-id.service headscale.service
+After=network-online.target headscale.service
 Wants=network-online.target
-Requires=pocket-id.service headscale.service
+Requires=headscale.service
 
 [Service]
 Type=simple

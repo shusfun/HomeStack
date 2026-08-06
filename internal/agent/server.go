@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +28,8 @@ type ServerOptions struct {
 	Sessions      *SessionStore
 	Tailnet       TailnetStatus
 	ModuleSecrets map[string]map[string]string
+	System        SystemManager
+	Updater       *AgentUpdater
 }
 
 type Server struct {
@@ -37,10 +42,12 @@ type Server struct {
 	secrets     map[string]map[string]string
 	fileProxy   http.Handler
 	mediaProxy  http.Handler
+	system      SystemManager
+	updater     *AgentUpdater
 }
 
 func NewServer(options ServerOptions) (*Server, error) {
-	if options.DeviceID == "" || options.DeviceName == "" || options.ConfigStore == nil || options.Sessions == nil || options.Tailnet == nil {
+	if options.DeviceID == "" || options.DeviceName == "" || options.ConfigStore == nil || options.Sessions == nil || options.Tailnet == nil || options.Updater == nil {
 		return nil, errors.New("Agent 依赖未完整配置")
 	}
 	_, ok := options.ConfigStore.Current()
@@ -49,7 +56,14 @@ func NewServer(options ServerOptions) (*Server, error) {
 	}
 	server := &Server{
 		deviceID: options.DeviceID, deviceName: options.DeviceName, configStore: options.ConfigStore,
-		sessions: options.Sessions, tailnet: options.Tailnet, secrets: options.ModuleSecrets,
+		sessions: options.Sessions, tailnet: options.Tailnet, secrets: options.ModuleSecrets, system: options.System, updater: options.Updater,
+	}
+	if server.system == nil {
+		system, err := NewSystemClient(DefaultHelperSocket)
+		if err != nil {
+			return nil, err
+		}
+		server.system = system
 	}
 	if err := server.Reload(); err != nil {
 		return nil, err
@@ -105,12 +119,153 @@ func (s *Server) Handler(static http.Handler) http.Handler {
 		writeAgentJSON(writer, http.StatusOK, map[string]string{"status": "ok", "version": "v1"})
 	})
 	mux.Handle("GET /api/v1/status", s.requireSession(s.requireActiveConfig(http.HandlerFunc(s.status))))
+	mux.Handle("GET /api/v1/system/metrics", s.requireSession(s.requireActiveConfig(http.HandlerFunc(s.metrics))))
+	mux.Handle("GET /api/v1/services", s.requireSession(s.requireActiveConfig(http.HandlerFunc(s.services))))
+	mux.Handle("POST /api/v1/services/{serviceID}/actions", s.requireSession(s.requireActiveConfig(http.HandlerFunc(s.serviceAction))))
+	mux.Handle("GET /api/v1/logs", s.requireSession(s.requireActiveConfig(http.HandlerFunc(s.logs))))
+	mux.Handle("GET /api/v1/updates/status", s.requireSession(s.requireActiveConfig(http.HandlerFunc(s.updateStatus))))
+	mux.Handle("POST /api/v1/updates/check", s.requireSession(s.requireActiveConfig(http.HandlerFunc(s.checkUpdate))))
+	mux.Handle("POST /api/v1/updates/download", s.requireSession(s.requireActiveConfig(http.HandlerFunc(s.downloadUpdate))))
+	mux.Handle("POST /api/v1/updates/install", s.requireSession(s.requireActiveConfig(http.HandlerFunc(s.installUpdate))))
 	mux.Handle("/api/v1/files/", s.requireSession(s.requireActiveConfig(s.dynamicProxy("filebrowser"))))
 	mux.Handle("/api/v1/media/", s.requireSession(s.requireActiveConfig(s.dynamicProxy("jellyfin"))))
 	if static != nil {
-		mux.Handle("/", static)
+		mux.Handle("/", s.requireDocumentSession(static))
 	}
 	return agentSecurityHeaders(mux)
+}
+
+func (s *Server) updateStatus(writer http.ResponseWriter, _ *http.Request) {
+	writeAgentJSON(writer, http.StatusOK, s.updater.Status())
+}
+
+func (s *Server) checkUpdate(writer http.ResponseWriter, request *http.Request) {
+	if !s.validWriteOrigin(request) {
+		writeAgentError(writer, http.StatusForbidden, "origin_rejected", "请求来源与 Agent 地址不匹配")
+		return
+	}
+	status, err := s.updater.Check(request.Context())
+	if err != nil {
+		writeAgentError(writer, http.StatusBadGateway, "update_check_failed", err.Error())
+		return
+	}
+	writeAgentJSON(writer, http.StatusOK, status)
+}
+
+func (s *Server) downloadUpdate(writer http.ResponseWriter, request *http.Request) {
+	if !s.validWriteOrigin(request) {
+		writeAgentError(writer, http.StatusForbidden, "origin_rejected", "请求来源与 Agent 地址不匹配")
+		return
+	}
+	status, err := s.updater.Download(request.Context())
+	if err != nil {
+		writeAgentError(writer, http.StatusBadGateway, "update_download_failed", err.Error())
+		return
+	}
+	writeAgentJSON(writer, http.StatusOK, status)
+}
+
+func (s *Server) installUpdate(writer http.ResponseWriter, request *http.Request) {
+	if !s.validWriteOrigin(request) {
+		writeAgentError(writer, http.StatusForbidden, "origin_rejected", "请求来源与 Agent 地址不匹配")
+		return
+	}
+	if err := s.updater.Install(); err != nil {
+		writeAgentError(writer, http.StatusInternalServerError, "update_install_failed", err.Error())
+		return
+	}
+	writeAgentJSON(writer, http.StatusAccepted, s.updater.Status())
+}
+
+func (s *Server) metrics(writer http.ResponseWriter, request *http.Request) {
+	metrics, err := s.system.Metrics(request.Context())
+	if err != nil {
+		writeAgentError(writer, http.StatusServiceUnavailable, "metrics_failed", err.Error())
+		return
+	}
+	writeAgentJSON(writer, http.StatusOK, metrics)
+}
+
+func (s *Server) services(writer http.ResponseWriter, request *http.Request) {
+	services, err := s.system.Services(request.Context())
+	if err != nil {
+		writeAgentError(writer, http.StatusServiceUnavailable, "services_failed", err.Error())
+		return
+	}
+	writeAgentJSON(writer, http.StatusOK, map[string]any{"services": services})
+}
+
+func (s *Server) serviceAction(writer http.ResponseWriter, request *http.Request) {
+	if !s.validWriteOrigin(request) {
+		writeAgentError(writer, http.StatusForbidden, "origin_rejected", "请求来源与 Agent 地址不匹配")
+		return
+	}
+	var body struct {
+		Action string `json:"action"`
+	}
+	request.Body = http.MaxBytesReader(writer, request.Body, 4096)
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&body); err != nil {
+		writeAgentError(writer, http.StatusBadRequest, "invalid_request", "服务动作请求无效: "+err.Error())
+		return
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF {
+		writeAgentError(writer, http.StatusBadRequest, "invalid_request", "服务动作请求只能包含一个 JSON 对象")
+		return
+	}
+	if err := s.system.Action(request.Context(), request.PathValue("serviceID"), body.Action); err != nil {
+		writeAgentError(writer, http.StatusBadRequest, "action_rejected", err.Error())
+		return
+	}
+	writer.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) logs(writer http.ResponseWriter, request *http.Request) {
+	limit := 100
+	if raw := request.URL.Query().Get("limit"); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value < 1 || value > 500 {
+			writeAgentError(writer, http.StatusBadRequest, "invalid_limit", "日志行数必须介于 1 和 500")
+			return
+		}
+		limit = value
+	}
+	page, err := s.system.Logs(request.Context(), request.URL.Query().Get("service"), limit, request.URL.Query().Get("cursor"))
+	if err != nil {
+		writeAgentError(writer, http.StatusBadRequest, "logs_rejected", err.Error())
+		return
+	}
+	writeAgentJSON(writer, http.StatusOK, page)
+}
+
+func (s *Server) requireDocumentSession(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		acceptsHTML := request.URL.Path == "/" || strings.Contains(request.Header.Get("Accept"), "text/html")
+		if acceptsHTML {
+			cookie, err := request.Cookie("homestack_session")
+			if err != nil || !s.sessions.Valid(cookie.Value) {
+				config, ok := s.configStore.Current()
+				if !ok {
+					http.Error(writer, "Agent 没有有效配置", http.StatusServiceUnavailable)
+					return
+				}
+				target := strings.TrimRight(config.ControlURL, "/") + "/devices/" + url.PathEscape(s.deviceID) + "/open"
+				http.Redirect(writer, request, target, http.StatusSeeOther)
+				return
+			}
+		}
+		next.ServeHTTP(writer, request)
+	})
+}
+
+func (s *Server) validWriteOrigin(request *http.Request) bool {
+	config, ok := s.configStore.Current()
+	if !ok {
+		return false
+	}
+	origin := strings.TrimRight(request.Header.Get("Origin"), "/")
+	return origin != "" && origin == strings.TrimRight(config.AgentURL, "/")
 }
 
 func (s *Server) redeemTicket(writer http.ResponseWriter, request *http.Request) {

@@ -1,49 +1,54 @@
-# Release 与一键安装
+# Release 与更新
 
-## 发布契约
+## 发布资产
 
-GitHub Actions 在推送符合 `vX.Y.Z` 的已有标签时创建 Release，也允许手动选择一个已经存在的标签。工作流固定使用 Go `1.26.1`、Node `26.6.0` 和 pnpm `10.32.1`，先完成 Go 测试、前端测试、类型检查与生产构建，再生成发布产物。
+GitHub Actions 只发布已存在且符合 `vX.Y.Z` 的标签。测试通过后，各平台在原生 runner 生成：
 
-Release 包含：
+- macOS amd64/arm64：推荐安装的 `.dmg`，以及只含单顶层 `HomeStack.app` 的 `_update.tar.gz`。
+- Windows amd64/arm64：当前用户范围 NSIS `_setup.exe`、`_portable.zip`，以及只含单顶层 `HomeStack.exe` 的 `_update.zip`。
+- Linux amd64/arm64：AppImage 和 `.deb`。
+- Linux amd64/arm64：Control、Agent 安装 `.tar.gz`，以及 Agent 单文件更新 `.tar.gz`。
+- 每个资产的 `.sig`、`checksums.txt`、`checksums.txt.sig`、Wails schema `latest.json` 和 `latest.json.sig`。
 
-- Linux amd64/arm64：`homestack-control` 与 `homestack-agent`。
-- Windows amd64/arm64：Wails 桌面端可执行文件归档。
-- macOS Intel/Apple Silicon：临时签名的 `.app` 归档。
-- Linux amd64/arm64：依赖 GTK4 与 WebKitGTK 6 的桌面端归档。
-- `checksums.txt`：所有归档的 SHA-256。
+`latest.json` 有 6 个 desktop 更新项和 2 个架构各自对应的 Agent 更新项，共 10 项。Wails 对同平台/架构选择首个资产，因此生成器显式保证 desktop 项排在 Agent 项之前。
 
-当前桌面包没有商业代码签名或公证。Windows SmartScreen 与 macOS Gatekeeper 可能显示来源提示；正式对外分发前必须配置独立签名凭据，不能关闭系统安全检查作为替代方案。
+## 签名门禁
+
+- `HOMESTACK_UPDATE_PRIVATE_KEY` 只存 GitHub Actions Secret；`HOMESTACK_UPDATE_PUBLIC_KEY` 注入客户端和 Release 安装命令。
+- 每个更新资产同时记录文件名、大小、平台、架构、SHA-256 和 `Ed25519(Sign(SHA-256(asset)))`。
+- 发布生成器要求完整 20 个基础资产；未知文件、缺失资产、公私钥不匹配都会阻断 Release。
+- 桌面与 Agent 下载后运行暂存程序 `--version-json`，再核对版本、GOOS 和 GOARCH。
+- AppImage 使用 Wails 原位更新；deb 只显示 GitHub 下载入口，不绕过包管理器提权。
+
+当前 macOS 只做 ad-hoc codesign、不公证；Windows 不做 Authenticode。Release 必须明确 Gatekeeper/SmartScreen 提示。未来取得商业凭据后再将 Developer ID、公证和 Authenticode 设为稳定版门禁。
 
 ## 创建发布
-
-先确保默认分支测试通过，再创建带说明的标签：
 
 ```bash
 git tag -a v0.1.3 -m "HomeStack v0.1.3"
 git push origin v0.1.3
 ```
 
-工作流不创建标签，也不会覆盖已有 Release。任何矩阵任务失败时均不会发布部分产物。
+工作流不创建标签、不覆盖 Release，也不发布部分矩阵产物。六个平台桌面包和两个 Linux CLI 架构必须全部成功。
 
 ## 本地打包
 
-通过 Wails 内置的 Task 运行器调用同一脚本：
-
 ```bash
+export HOMESTACK_UPDATE_PUBLIC_KEY='REPLACE_WITH_BASE64_ED25519_PUBLIC_KEY'
 GOENV=./go.env go tool wails3 task release:package \
-  COMPONENT=control VERSION=v0.1.3 GOOS=linux ARCH=amd64
+  COMPONENT=desktop VERSION=v0.1.3 GOOS=darwin ARCH=arm64
 ```
 
-`COMPONENT` 只能是 `control`、`agent` 或 `desktop`。Control 与 Agent 只允许 Linux 目标；桌面端必须在对应操作系统原生构建。
+Control 与 Agent 只允许 Linux；桌面必须在目标操作系统和目标架构的原生环境构建。发布前运行：
 
-## 安装边界
+```bash
+bash -n deploy/install.sh
+bash -n scripts/package-release.sh
+node ~/.codex/skills/guard-repo-foundations/scripts/audit-repo-foundations.mjs --strict .
+```
 
-安装器支持 `install`、`upgrade` 和 `--version`，每次下载都要求 Release 同时存在匹配的 `checksums.txt` 条目。配置文件已存在时不会覆盖；升级运行中的服务时会先停止，二进制校验并替换成功后再启动。
+## 安装器边界
 
-安装器不会执行以下操作：
+安装器要求 `--update-public-key` 或 `HOMESTACK_UPDATE_PUBLIC_KEY`，同时验证资产 `.sig` 和 SHA-256。已有配置不会覆盖；升级运行中服务会先停止，替换成功后再启动。
 
-- 安装或升级任何外部组件。
-- 自动申请域名或 TLS 证书。
-- 把 HTTPS 降级成 HTTP。
-- 开启公共 DERP、出口节点或代理节点。
-- 在 Agent 安全存储不可用时改用明文密钥。
+安装器不会自动申请 DNS/TLS、安装第三方组件、降低 HTTPS、启用公共 DERP/出口节点，也不会在加密凭据不可用时写明文密钥。

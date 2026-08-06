@@ -23,6 +23,7 @@ import (
 
 type ServerOptions struct {
 	Authenticator Authenticator
+	Owners        *OwnerStore
 	Invites       *invite.Store
 	Devices       *DeviceStore
 	Headscale     Headscale
@@ -36,6 +37,7 @@ type ServerOptions struct {
 
 type Server struct {
 	authenticator Authenticator
+	owners        *OwnerStore
 	invites       *invite.Store
 	devices       *DeviceStore
 	headscale     Headscale
@@ -58,7 +60,7 @@ type ticketResponse struct {
 }
 
 func NewServer(options ServerOptions) (*Server, error) {
-	if options.Authenticator == nil || options.Invites == nil || options.Devices == nil || options.Headscale == nil {
+	if options.Authenticator == nil || options.Owners == nil || options.Invites == nil || options.Devices == nil || options.Headscale == nil {
 		return nil, errors.New("Control 依赖未完整配置")
 	}
 	if len(options.SigningKey) != ed25519.PrivateKeySize || options.SigningKeyID == "" {
@@ -78,7 +80,7 @@ func NewServer(options ServerOptions) (*Server, error) {
 		options.Random = rand.Reader
 	}
 	return &Server{
-		authenticator: options.Authenticator, invites: options.Invites, devices: options.Devices, headscale: options.Headscale,
+		authenticator: options.Authenticator, owners: options.Owners, invites: options.Invites, devices: options.Devices, headscale: options.Headscale,
 		signingKey: options.SigningKey, signingKeyID: options.SigningKeyID, publicURL: options.PublicURL,
 		headscaleURL: options.HeadscaleURL, now: options.Now, random: options.Random,
 	}, nil
@@ -88,16 +90,16 @@ func (s *Server) Handler(static http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/health", s.health)
 	if webAuth, ok := s.authenticator.(WebAuthenticator); ok {
-		mux.HandleFunc("GET /auth/login", webAuth.StartWebLogin)
-		mux.HandleFunc("GET /auth/callback", webAuth.CompleteWebLogin)
-		mux.HandleFunc("POST /auth/logout", webAuth.Logout)
+		webAuth.RegisterRoutes(mux)
 	}
 	mux.HandleFunc("GET /api/v1/meta", s.meta)
 	mux.HandleFunc("GET /api/v1/me", s.me)
-	mux.HandleFunc("POST /api/v1/admin/invites", s.createInvite)
+	mux.HandleFunc("POST /api/v1/device-enrollments", s.createEnrollment)
+	mux.HandleFunc("POST /api/v1/tailnet/auth-keys", s.createTailnetAuthKey)
 	mux.HandleFunc("POST /api/v1/join/exchange", s.exchangeJoin)
 	mux.HandleFunc("GET /api/v1/devices", s.listDevices)
 	mux.HandleFunc("POST /api/v1/devices/{deviceID}/tickets", s.createTicket)
+	mux.HandleFunc("GET /devices/{deviceID}/open", s.openDevice)
 	mux.HandleFunc("PUT /api/v1/devices/{deviceID}/status", s.updateStatus)
 	mux.HandleFunc("GET /api/v1/device/config", s.getDeviceConfig)
 	if static != nil {
@@ -113,7 +115,7 @@ func (s *Server) health(writer http.ResponseWriter, _ *http.Request) {
 func (s *Server) meta(writer http.ResponseWriter, _ *http.Request) {
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"version":            "v1",
-		"oidc":               s.authenticator.Metadata(),
+		"providers":          s.authenticator.Metadata(),
 		"signing_key_id":     s.signingKeyID,
 		"signing_public_key": base64.RawURLEncoding.EncodeToString(s.signingKey.Public().(ed25519.PublicKey)),
 		"components": map[string]string{
@@ -128,16 +130,23 @@ func (s *Server) me(writer http.ResponseWriter, request *http.Request) {
 	if !ok {
 		return
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{"subject": identity.Subject, "email": identity.Email, "name": identity.Name, "admin": identity.Admin})
+	owner, exists := s.owners.Owner()
+	if !exists || owner.ID != identity.Subject {
+		writeControlError(writer, http.StatusUnauthorized, "owner_missing", "当前所有者不存在")
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"subject": identity.Subject, "email": identity.Email, "name": identity.Name, "identities": owner.Identities,
+	})
 }
 
-func (s *Server) createInvite(writer http.ResponseWriter, request *http.Request) {
+func (s *Server) createEnrollment(writer http.ResponseWriter, request *http.Request) {
 	identity, ok := s.requireIdentity(writer, request)
 	if !ok {
 		return
 	}
-	if !identity.Admin {
-		writeControlError(writer, http.StatusForbidden, "admin_required", "需要 HomeStack 管理员权限")
+	if !s.validWriteOrigin(request) {
+		writeControlError(writer, http.StatusForbidden, "origin_rejected", "请求来源与 Control 地址不匹配")
 		return
 	}
 	var policy protocol.JoinPolicyV1
@@ -156,17 +165,34 @@ func (s *Server) createInvite(writer http.ResponseWriter, request *http.Request)
 	}
 	descriptor, record, err := s.invites.Create(s.publicURL, identity.Subject, 10*time.Minute, payload)
 	if err != nil {
-		writeControlError(writer, http.StatusInternalServerError, "invite_failed", err.Error())
+		writeControlError(writer, http.StatusInternalServerError, "enrollment_failed", err.Error())
 		return
 	}
 	writeJSON(writer, http.StatusCreated, createInviteResponse{JoinInfo: descriptor.String(), ExpiresAt: record.ExpiresAt})
 }
 
-func (s *Server) exchangeJoin(writer http.ResponseWriter, request *http.Request) {
+func (s *Server) createTailnetAuthKey(writer http.ResponseWriter, request *http.Request) {
 	identity, ok := s.requireIdentity(writer, request)
 	if !ok {
 		return
 	}
+	if !s.validWriteOrigin(request) {
+		writeControlError(writer, http.StatusForbidden, "origin_rejected", "请求来源与 Control 地址不匹配")
+		return
+	}
+	authKey, err := s.headscale.CreateSingleUseKey(request.Context(), identity.Email)
+	if err != nil {
+		writeControlError(writer, http.StatusBadGateway, "headscale_failed", err.Error())
+		return
+	}
+	writeJSON(writer, http.StatusCreated, map[string]any{
+		"login_server": s.headscaleURL,
+		"auth_key":     authKey,
+		"expires_at":   s.now().UTC().Add(10 * time.Minute),
+	})
+}
+
+func (s *Server) exchangeJoin(writer http.ResponseWriter, request *http.Request) {
 	var joinRequest protocol.JoinRequestV1
 	if err := decodeJSONBody(writer, request, &joinRequest); err != nil {
 		writeControlError(writer, http.StatusBadRequest, "invalid_request", err.Error())
@@ -204,7 +230,16 @@ func (s *Server) exchangeJoin(writer http.ResponseWriter, request *http.Request)
 		writeControlError(writer, http.StatusInternalServerError, "policy_failed", "邀请码策略无法解析")
 		return
 	}
-	authKey, err := s.headscale.CreateSingleUseKey(request.Context(), identity.Email)
+	if joinRequest.DeviceName != policy.DeviceName || joinRequest.AgentURL != policy.AgentURL {
+		writeControlError(writer, http.StatusBadRequest, "policy_mismatch", "设备名称或 Agent 地址与配对策略不匹配")
+		return
+	}
+	owner, ok := s.ownerForSubject(record.CreatedBy)
+	if !ok {
+		writeControlError(writer, http.StatusUnauthorized, "owner_missing", "配对码所属的 HomeStack 所有者不存在")
+		return
+	}
+	authKey, err := s.headscale.CreateSingleUseKey(request.Context(), owner.Email)
 	if err != nil {
 		writeControlError(writer, http.StatusBadGateway, "headscale_failed", err.Error())
 		return
@@ -243,7 +278,7 @@ func (s *Server) exchangeJoin(writer http.ResponseWriter, request *http.Request)
 		return
 	}
 	if err := s.devices.Add(DeviceRecord{
-		ID: deviceID, Name: policy.DeviceName, OwnerSubject: identity.Subject, OwnerEmail: identity.Email, AgentURL: policy.AgentURL,
+		ID: deviceID, Name: policy.DeviceName, OwnerSubject: owner.ID, OwnerEmail: owner.Email, AgentURL: policy.AgentURL,
 		Config: deviceConfig, SignedConfig: signedConfig, CreatedAt: now,
 	}, deviceToken); err != nil {
 		writeControlError(writer, http.StatusInternalServerError, "device_failed", err.Error())
@@ -267,15 +302,53 @@ func (s *Server) createTicket(writer http.ResponseWriter, request *http.Request)
 	if !ok {
 		return
 	}
+	if !s.validWriteOrigin(request) {
+		writeControlError(writer, http.StatusForbidden, "origin_rejected", "请求来源与 Control 地址不匹配")
+		return
+	}
 	record, err := s.devices.Owned(request.PathValue("deviceID"), identity.Subject)
 	if err != nil {
 		writeControlError(writer, http.StatusForbidden, "device_denied", err.Error())
 		return
 	}
+	target, expiresAt, err := s.signedAgentURL(identity, record)
+	if err != nil {
+		writeControlError(writer, http.StatusInternalServerError, "ticket_failed", err.Error())
+		return
+	}
+	writeJSON(writer, http.StatusCreated, ticketResponse{URL: target, ExpiresAt: expiresAt})
+}
+
+func (s *Server) openDevice(writer http.ResponseWriter, request *http.Request) {
+	identity, err := s.authenticator.Authenticate(request.Context(), request)
+	if err != nil {
+		providers := s.authenticator.Metadata()
+		if len(providers) == 0 {
+			http.Error(writer, "Control 未配置登录方式", http.StatusServiceUnavailable)
+			return
+		}
+		returnPath := "/devices/" + url.PathEscape(request.PathValue("deviceID")) + "/open"
+		login := "/auth/login/" + url.PathEscape(providers[0].ID) + "?return=" + url.QueryEscape(returnPath)
+		http.Redirect(writer, request, login, http.StatusSeeOther)
+		return
+	}
+	record, err := s.devices.Owned(request.PathValue("deviceID"), identity.Subject)
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusForbidden)
+		return
+	}
+	target, _, err := s.signedAgentURL(identity, record)
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(writer, request, target, http.StatusSeeOther)
+}
+
+func (s *Server) signedAgentURL(identity Identity, record DeviceRecord) (string, time.Time, error) {
 	nonce, err := randomToken(s.random, 24)
 	if err != nil {
-		writeControlError(writer, http.StatusInternalServerError, "random_failed", err.Error())
-		return
+		return "", time.Time{}, err
 	}
 	now := s.now().UTC()
 	claims := protocol.AccessTicketClaimsV1{
@@ -284,19 +357,30 @@ func (s *Server) createTicket(writer http.ResponseWriter, request *http.Request)
 	}
 	ticket, err := secure.SignJWS(s.signingKey, s.signingKeyID, claims)
 	if err != nil {
-		writeControlError(writer, http.StatusInternalServerError, "sign_failed", err.Error())
-		return
+		return "", time.Time{}, err
 	}
 	target, err := url.Parse(record.AgentURL)
 	if err != nil {
-		writeControlError(writer, http.StatusInternalServerError, "device_url_failed", err.Error())
-		return
+		return "", time.Time{}, fmt.Errorf("解析 Agent 地址失败: %w", err)
 	}
 	target.Path = "/access"
 	query := target.Query()
 	query.Set("ticket", ticket)
 	target.RawQuery = query.Encode()
-	writeJSON(writer, http.StatusCreated, ticketResponse{URL: target.String(), ExpiresAt: claims.ExpiresAt})
+	return target.String(), claims.ExpiresAt, nil
+}
+
+func (s *Server) ownerForSubject(subject string) (Owner, bool) {
+	owner, ok := s.owners.Owner()
+	return owner, ok && owner.ID == subject
+}
+
+func (s *Server) validWriteOrigin(request *http.Request) bool {
+	if strings.HasPrefix(request.Header.Get("Authorization"), "Bearer ") {
+		return true
+	}
+	origin := request.Header.Get("Origin")
+	return origin != "" && strings.TrimRight(origin, "/") == strings.TrimRight(s.publicURL, "/")
 }
 
 func (s *Server) updateStatus(writer http.ResponseWriter, request *http.Request) {

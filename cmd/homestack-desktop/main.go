@@ -4,16 +4,24 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"runtime"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 	"github.com/wangshangbin/homestack/internal/buildinfo"
 	"github.com/wangshangbin/homestack/internal/desktop"
 	"github.com/wangshangbin/homestack/internal/web"
+	"github.com/wangshangbin/homestack/internal/windowchrome"
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "--appimage-update-helper" {
+		if err := desktop.RunAppImageUpdateHelper(os.Args[2:]); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	if buildinfo.Requested(os.Args[1:]) {
-		fmt.Println(buildinfo.String("homestack-desktop"))
+		fmt.Println(buildinfo.Output("homestack-desktop", os.Args[1:]))
 		return
 	}
 	service := desktop.NewService()
@@ -30,15 +38,20 @@ func main() {
 			ApplicationShouldTerminateAfterLastWindowClosed: true,
 		},
 	})
-	app.Window.NewWithOptions(application.WebviewWindowOptions{
+	if err := service.ConfigureUpdater(app); err != nil {
+		log.Printf("桌面更新器不可用: %v", err)
+	}
+	windowOptions := application.WebviewWindowOptions{
 		Title:            "HomeStack",
-		Width:            1180,
-		Height:           760,
-		MinWidth:         860,
-		MinHeight:        600,
+		Width:            900,
+		Height:           680,
+		MinWidth:         720,
+		MinHeight:        520,
 		URL:              "/",
 		BackgroundColour: application.NewRGB(245, 247, 248),
-	})
+	}
+	windowchrome.Apply(&windowOptions, runtime.GOOS)
+	app.Window.NewWithOptions(windowOptions)
 	if err := app.Run(); err != nil {
 		log.Fatal(err)
 	}

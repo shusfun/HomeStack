@@ -6,6 +6,11 @@ Wants=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=%h/.config/homestack/agent.env
+Environment=HOMESTACK_AGENT_TLS_CERT=%d/tls.crt
+Environment=HOMESTACK_AGENT_TLS_KEY=%d/tls.key
+LoadCredentialEncrypted=homestack-agent-profile
+LoadCredentialEncrypted=tls.crt
+LoadCredentialEncrypted=tls.key
 ExecStart=%h/.local/bin/homestack-agent
 Restart=on-failure
 RestartSec=5s
@@ -15,6 +20,7 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=false
 ReadWritePaths=%h/.local/state/homestack
+ReadOnlyPaths=/run/homestack/helper.sock
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true

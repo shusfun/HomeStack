@@ -38,9 +38,14 @@ jobs:
 
       - name: 校验发布标签
         shell: bash
+        env:
+          UPDATE_PRIVATE_KEY: ${{ secrets.HOMESTACK_UPDATE_PRIVATE_KEY }}
+          UPDATE_PUBLIC_KEY: ${{ secrets.HOMESTACK_UPDATE_PUBLIC_KEY }}
         run: |
           [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]]
           git rev-parse --verify "refs/tags/$RELEASE_TAG^{commit}"
+          [[ -n "$UPDATE_PRIVATE_KEY" ]] || { echo "缺少 HOMESTACK_UPDATE_PRIVATE_KEY" >&2; exit 1; }
+          [[ -n "$UPDATE_PUBLIC_KEY" ]] || { echo "缺少 HOMESTACK_UPDATE_PUBLIC_KEY" >&2; exit 1; }
 
       - name: 配置 pnpm
         uses: pnpm/action-setup@v4
@@ -102,6 +107,9 @@ jobs:
       - name: Go 测试
         run: go test -p=2 -parallel=2 ./...
 
+      - name: 发布清单集成测试
+        run: go test -p=2 -parallel=2 scripts/release-manifest.go scripts/release-manifest_test.go
+
       - name: 上传共享前端
         uses: actions/upload-artifact@v7
         with:
@@ -111,11 +119,15 @@ jobs:
 
   linux-cli:
     needs: verify
-    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        arch: [amd64, arm64]
+        include:
+          - runner: ubuntu-latest
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: 检出发布标签
         uses: actions/checkout@v6
@@ -143,6 +155,8 @@ jobs:
 
       - name: 打包 Control 与 Agent
         shell: bash
+        env:
+          HOMESTACK_UPDATE_PUBLIC_KEY: ${{ secrets.HOMESTACK_UPDATE_PUBLIC_KEY }}
         run: |
           chmod +x scripts/package-release.sh
           scripts/package-release.sh control "$RELEASE_TAG" linux "${{ matrix.arch }}"
@@ -244,6 +258,8 @@ jobs:
 
       - name: 打包桌面端
         shell: bash
+        env:
+          HOMESTACK_UPDATE_PUBLIC_KEY: ${{ secrets.HOMESTACK_UPDATE_PUBLIC_KEY }}
         run: |
           chmod +x scripts/package-release.sh
           scripts/package-release.sh desktop "$RELEASE_TAG" "${{ matrix.os }}" "${{ matrix.arch }}"
@@ -252,7 +268,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: homestack-desktop-${{ matrix.os }}-${{ matrix.arch }}
-          path: dist/*.tar.gz
+          path: dist/*
           retention-days: 1
 
   publish:
@@ -279,16 +295,34 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: 生成 SHA-256 清单
+      - name: 配置 Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: 1.26.1
+          check-latest: false
+          cache: false
+
+      - name: 生成签名、SHA-256 清单与 latest.json
         shell: bash
+        env:
+          UPDATE_PRIVATE_KEY: ${{ secrets.HOMESTACK_UPDATE_PRIVATE_KEY }}
+          UPDATE_PUBLIC_KEY: ${{ secrets.HOMESTACK_UPDATE_PUBLIC_KEY }}
         run: |
-          cd dist
-          sha256sum *.tar.gz > checksums.txt
+          go run scripts/release-manifest.go \
+            --dist dist \
+            --tag "$RELEASE_TAG" \
+            --repository "$GITHUB_REPOSITORY" \
+            --private-key "$UPDATE_PRIVATE_KEY" \
+            --public-key "$UPDATE_PUBLIC_KEY"
+          test -s dist/latest.json
+          test -s dist/latest.json.sig
+          test -s dist/checksums.txt
 
       - name: 创建 GitHub Release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          UPDATE_PUBLIC_KEY: ${{ secrets.HOMESTACK_UPDATE_PUBLIC_KEY }}
         run: |
           cat > release-notes.md <<EOF
           HomeStack $RELEASE_TAG
@@ -296,16 +330,20 @@ jobs:
           Linux Control 一键安装：
 
           \`\`\`bash
-          curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/deploy/install.sh | sudo bash -s -- control --version "$RELEASE_TAG"
+          curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/deploy/install.sh | sudo bash -s -- control --version "$RELEASE_TAG" --update-public-key "$UPDATE_PUBLIC_KEY"
           \`\`\`
 
           Linux Agent 一键安装：
 
           \`\`\`bash
-          curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/deploy/install.sh | bash -s -- agent --version "$RELEASE_TAG"
+          curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/deploy/install.sh | bash -s -- agent --version "$RELEASE_TAG" --update-public-key "$UPDATE_PUBLIC_KEY"
           \`\`\`
 
-          所有下载必须使用本 Release 中的 \`checksums.txt\` 校验。桌面端当前为未经过商业证书签名的测试发布包。
+          桌面端推荐安装包：macOS 使用对应架构的 \`.dmg\`，Windows 使用当前用户范围的 \`_setup.exe\`，Linux 使用 AppImage 或 deb。
+
+          自动更新与 Agent 更新直接从本 Release 下载，使用客户端内置的 Ed25519 公钥验证，不经过 HomeStack VPS。\`checksums.txt\` 仅用于人工核验，不是更新信任根。
+
+          当前 macOS 仅使用 ad-hoc codesign 且未公证，Windows 未做 Authenticode；Gatekeeper 或 SmartScreen 可能显示来源警告。
           EOF
           gh release create "$RELEASE_TAG" dist/* \
             --verify-tag \

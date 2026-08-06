@@ -1,33 +1,50 @@
 # 安全模型
 
-## 信任边界
+## 网络与信任边界
 
-- 公网 VPS 可验证身份、登记设备、签发短期票据和下发签名配置，但不持有设备 X25519 私钥。
-- Tailscale/WireGuard 负责数据面加密。文件、下载、媒体和 Agent 页面不经过 HomeStack Control。
-- 无法点对点连接时仅允许 Headscale 内置的自有 DERP；`derp.urls` 为空且自动更新关闭。
-- HomeStack 不是代理服务，不提供出口节点，也不会生成“小火箭节点”。Headscale 策略没有设备互访、子网路由或互联网出口授权。
+- VPS Control 只处理登录、设备登记、心跳、签名配置、十分钟配对码和三十秒访问票据，不代理 Agent 页面或业务流量。
+- 文件、影视、日志和管理请求直接到设备 Tailnet HTTPS 地址；Tailscale 优先 WireGuard 点对点，失败时仅使用 Headscale 配置的自有 DERP。
+- Agent 上游 FileBrowser、Jellyfin 和 cc-connect 只监听回环地址，Agent `9443` 只绑定 Tailscale IP。
+- 不提供公共 DERP、出口节点、子网路由、反向代理、任意命令、Web Shell 或系统升级入口。
 
-## 身份与配置
+## 所有者与登录
 
-- Pocket ID 通过 Passkey 提供 OIDC，授权码流程使用 `state`、`nonce` 和 PKCE S256。
-- 桌面端 OIDC 唯一允许的 HTTP 是 RFC 8252 本机回环回调 `http://127.0.0.1:<随机端口>/callback`，不会离开设备。
-- 邀请码使用安全随机数，十分钟过期且只能兑换一次；Headscale 预认证密钥同样十分钟过期、单次使用。
-- Control 使用 Ed25519 JWS 签名设备配置。Agent 校验版本、设备 ID、时间和单调递增 revision，拒绝篡改、过期和回退。
-- 设备凭据使用临时 X25519 密钥协商、HKDF-SHA256 和 AES-256-GCM 封装。
-- 设备私钥与档案仅进入 macOS Keychain、Windows Credential Manager 或 Linux Secret Service；安全存储不可用时直接失败。
+- 系统只持久化一个 `Owner`，一个所有者可绑定多个 `{provider, subject}` 身份键。
+- 第一个成功登录者认领所有者；此后未绑定身份一律拒绝，即使邮箱完全相同也不会自动合并。
+- Pocket ID 和 Google 使用 OIDC，GitHub 使用 OAuth；授权流程均使用一次性 `state` 和 PKCE S256，OIDC 额外验证 ID Token `nonce`。
+- 新身份只能由已有浏览器会话的所有者从“登录身份”页面主动绑定。
+- App 登录使用系统浏览器和随机回环端口。回环只接收两分钟单次 code，Control 再验证 App PKCE verifier 后签发 access/refresh token。
+- Control 只持久化会话令牌 SHA-256；App refresh token 只进入 macOS Keychain、Windows Credential Manager 或 Linux Secret Service。
 
-## 访问控制
+首个登录即所有者存在公网抢占窗口。首次部署必须在 Control 对公网开放后立即完成所有者登录。
 
-- Headscale 从单条 owner-only grant 开始：已登录用户仅能访问自己名下设备的 TCP `9443`。
-- Control 签发三十秒单次访问票据；Agent 持久化票据 nonce 防重放，再签发 `Secure`、`HttpOnly`、`SameSite=Strict` 会话。
-- Agent 只接受 Tailscale 地址上的 HTTPS。生产证书必须可由客户端系统信任，禁止忽略证书错误。
-- FileBrowser 只允许 GET/HEAD 的资源、原始文件、预览、搜索和用量接口；上传、重命名、修改、删除和路径穿越均在 BFF 拒绝。
-- Jellyfin 只代理媒体浏览、图片、播放信息、Range/HLS 和播放进度相关接口。
-- cc-connect 强制企业微信 WebSocket、明确 `allow_from/admin_from`，拒绝 `*`，按项目限制绝对 `work_dir`。Codex 固定为 `suggest` 与 stdio `app_server`，工具调用必须经过真实审批；不启用 Management API，也不监听 app-server 端口。
+## 配对与访问
+
+- Linux 配对码使用安全随机数，十分钟过期且只能兑换一次；Headscale 预认证密钥同样短期、单次使用。
+- Agent 生成临时 X25519 密钥，Control 用 HKDF-SHA256 与 AES-256-GCM 密封设备凭据，并用 Ed25519 JWS 签名设备配置。
+- Agent 校验配置设备 ID、域名、过期时间和单调 revision；设备档案与 TLS 私钥通过 `systemd-creds` 注入。
+- Control 只对当前所有者名下的固定设备签发三十秒票据，不接受任意 return URL。Agent 持久化 nonce 防重放，再签发 `Secure`、`HttpOnly`、`SameSite=Strict` 会话。
+- 未登录的 Agent 文档请求跳到 Control 固定设备入口；API 请求返回真实 `401`。浏览器写操作必须通过同源 Origin 校验。
+
+## Agent 权限
+
+- FileBrowser 只允许 GET/HEAD 的资源、原始文件、预览、搜索和用量接口；写操作和路径穿越直接拒绝。
+- Jellyfin 只代理浏览、图片、Range/HLS、播放信息和播放进度白名单。
+- root helper 只接受指定 Agent UID 的 Unix Socket peer credential。
+- `tailscale` 和 `homestack-agent` 只允许重启；`filebrowser`、`jellyfin` 只允许启停或重启。服务 ID、动作和参数均为固定值。
+- 日志只允许固定 unit、1 到 500 行和无空白的 journal cursor，并对 authorization、token、secret、password、cookie 字段脱敏。
+- cc-connect 生命周期由 Agent 内部管理，禁止把任意 systemd unit 或命令传给 helper。
+
+## 更新信任
+
+- 桌面端和 Agent 直接从 GitHub Release 下载，不经过 VPS。
+- CI 私钥签名资产 SHA-256 digest；客户端只内置 Ed25519 公钥。缺签名、摘要、资产、平台、架构或内嵌版本不匹配都会失败。
+- Agent 更新在同文件系统暂存，严格解包单文件，核对 `--version-json`，备份重命名后由独立 helper 重启并健康检查；失败恢复旧版本并再次健康检查。
+- `checksums.txt` 只供人工核验，不作为更新信任根。
 
 ## 已知边界
 
-- 单台自有 DERP 是单点故障；故障时不降级到公共 DERP。
-- Wails 3 固定版本仍为 Beta，发布前必须分别完成 Windows、macOS、Linux 构建验收。
-- FileBrowser Quantum `v0.3.5` 的监听实现忽略配置中的地址并绑定所有接口。部署单元通过 systemd `IPAddressDeny=any` 与 `IPAddressAllow=localhost` 在内核层只允许本机流量；不支持该 systemd 能力的平台不得直接启动该组件。
-- Linux Agent 依赖当前用户的 Secret Service。没有可解锁安全存储的纯 headless 会话会直接启动失败，不会写明文密钥。
+- 单台自有 DERP 是单点故障，故障时不会降级到公共 DERP。
+- Wails 3 当前固定 Beta 版本，必须在三种操作系统原生 runner 验证。
+- macOS 首版仅 ad-hoc codesign 且未公证，Windows 未做 Authenticode，系统可能显示 Gatekeeper 或 SmartScreen 警告。
+- FileBrowser Quantum `v0.3.5` 仍依赖 systemd 网络沙箱把监听限制在本机；缺少该能力的平台不得直接启动。

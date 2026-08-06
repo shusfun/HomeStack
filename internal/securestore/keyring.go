@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/wangshangbin/homestack/internal/protocol"
 	"github.com/wangshangbin/homestack/internal/secure"
@@ -16,7 +17,63 @@ const (
 	serviceName       = "HomeStack"
 	deviceKeyAccount  = "device-x25519-v1"
 	deviceProfileName = "device-profile-v1"
+	appSessionAccount = "app-session-v1"
 )
+
+type AppSession struct {
+	ControlURL       string    `json:"control_url"`
+	AccessToken      string    `json:"access_token"`
+	AccessExpiresAt  time.Time `json:"access_expires_at"`
+	RefreshToken     string    `json:"refresh_token"`
+	RefreshExpiresAt time.Time `json:"refresh_expires_at"`
+}
+
+func SaveAppSession(session AppSession) error {
+	if session.ControlURL == "" || session.AccessToken == "" || session.RefreshToken == "" || session.AccessExpiresAt.IsZero() || session.RefreshExpiresAt.IsZero() {
+		return errors.New("App 登录凭据不完整")
+	}
+	data, err := json.Marshal(session)
+	if err != nil {
+		return fmt.Errorf("编码 App 登录凭据失败: %w", err)
+	}
+	if err := keyring.Set(serviceName, appSessionAccount, string(data)); err != nil {
+		return fmt.Errorf("保存 App 登录凭据失败，不允许明文降级: %w", err)
+	}
+	return nil
+}
+
+func LoadAppSession() (AppSession, error) {
+	data, err := keyring.Get(serviceName, appSessionAccount)
+	if err != nil {
+		return AppSession{}, fmt.Errorf("读取 App 登录凭据失败: %w", err)
+	}
+	var session AppSession
+	if err := json.Unmarshal([]byte(data), &session); err != nil {
+		return AppSession{}, fmt.Errorf("解析 App 登录凭据失败: %w", err)
+	}
+	if session.ControlURL == "" || session.AccessToken == "" || session.RefreshToken == "" || session.AccessExpiresAt.IsZero() || session.RefreshExpiresAt.IsZero() {
+		return AppSession{}, errors.New("App 登录凭据不完整")
+	}
+	return session, nil
+}
+
+func HasAppSession() (bool, error) {
+	_, err := keyring.Get(serviceName, appSessionAccount)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, keyring.ErrNotFound) {
+		return false, nil
+	}
+	return false, fmt.Errorf("检查 App 登录凭据失败: %w", err)
+}
+
+func DeleteAppSession() error {
+	if err := keyring.Delete(serviceName, appSessionAccount); err != nil && !errors.Is(err, keyring.ErrNotFound) {
+		return fmt.Errorf("删除 App 登录凭据失败: %w", err)
+	}
+	return nil
+}
 
 type DeviceProfile struct {
 	DeviceID         string                      `json:"device_id"`

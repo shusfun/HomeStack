@@ -10,7 +10,7 @@ usage() {
 HomeStack Linux 安装器
 
 用法:
-  install.sh [install|upgrade] <control|agent> [--version vX.Y.Z]
+  install.sh [install|upgrade] <control|agent> [--version vX.Y.Z] --update-public-key <base64>
 
 示例:
   install.sh control
@@ -30,6 +30,7 @@ fail() {
 command_name="install"
 component=""
 requested_version=""
+update_public_key="${HOMESTACK_UPDATE_PUBLIC_KEY:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -49,6 +50,15 @@ while [[ $# -gt 0 ]]; do
       ;;
     --version=*)
       requested_version="${1#*=}"
+      shift
+      ;;
+    --update-public-key)
+      [[ -n "${2:-}" ]] || fail "$1 必须提供 base64 Ed25519 公钥"
+      update_public_key="$2"
+      shift 2
+      ;;
+    --update-public-key=*)
+      update_public_key="${1#*=}"
       shift
       ;;
     -h|--help)
@@ -74,9 +84,10 @@ case "$(uname -m)" in
   *) fail "不支持的处理器架构: $(uname -m)" ;;
 esac
 
-for dependency in curl tar sha256sum awk grep install mktemp sed; do
+for dependency in curl tar sha256sum awk grep install mktemp sed openssl base64 wc; do
   command -v "$dependency" >/dev/null 2>&1 || fail "缺少命令: $dependency"
 done
+[[ -n "$update_public_key" ]] || fail "必须通过 --update-public-key 或 HOMESTACK_UPDATE_PUBLIC_KEY 提供 Ed25519 公钥"
 
 normalize_version() {
   local value="$1"
@@ -108,11 +119,19 @@ trap 'rm -rf -- "$work_dir"' EXIT
 
 echo "下载 HomeStack $component $release_tag ($arch)"
 curl -fL --retry 3 --connect-timeout 10 -o "$work_dir/$asset" "$release_base/$asset"
+curl -fL --retry 3 --connect-timeout 10 -o "$work_dir/$asset.sig" "$release_base/$asset.sig"
 curl -fL --retry 3 --connect-timeout 10 -o "$work_dir/checksums.txt" "$release_base/checksums.txt"
 
 expected_checksum=$(awk -v name="$asset" '$2 == name || $2 == "*" name { print $1 }' "$work_dir/checksums.txt")
 [[ "$expected_checksum" =~ ^[a-fA-F0-9]{64}$ ]] || fail "checksums.txt 中缺少 $asset 的 SHA-256"
 printf '%s  %s\n' "$expected_checksum" "$work_dir/$asset" | sha256sum -c - >/dev/null || fail "Release 文件 SHA-256 校验失败"
+printf '\x30\x2a\x30\x05\x06\x03\x2b\x65\x70\x03\x21\x00' > "$work_dir/update-public.der"
+printf '%s' "$update_public_key" | base64 -d >> "$work_dir/update-public.der" 2>/dev/null || fail "Ed25519 公钥不是有效 base64"
+[[ "$(wc -c < "$work_dir/update-public.der")" -eq 44 ]] || fail "Ed25519 公钥必须为 32 字节"
+openssl pkey -pubin -inform DER -in "$work_dir/update-public.der" -out "$work_dir/update-public.pem" >/dev/null 2>&1 || fail "Ed25519 公钥无法转换为 OpenSSL 格式"
+base64 -d < "$work_dir/$asset.sig" > "$work_dir/$asset.sig.bin" 2>/dev/null || fail "Release Ed25519 签名编码无效"
+openssl dgst -sha256 -binary "$work_dir/$asset" > "$work_dir/$asset.sha256.bin" || fail "计算 Release SHA-256 失败"
+openssl pkeyutl -verify -pubin -inkey "$work_dir/update-public.pem" -rawin -in "$work_dir/$asset.sha256.bin" -sigfile "$work_dir/$asset.sig.bin" >/dev/null 2>&1 || fail "Release Ed25519 签名校验失败"
 
 mkdir "$work_dir/archive"
 tar -xzf "$work_dir/$asset" -C "$work_dir/archive"
@@ -123,8 +142,8 @@ chmod 0755 "$binary"
 
 install_control() {
   [[ "$EUID" -eq 0 ]] || fail "安装 Control 必须使用 root，例如 curl ... | sudo bash -s -- control"
-  command -v systemctl >/dev/null 2>&1 || fail "系统缺少 systemctl"
-  command -v useradd >/dev/null 2>&1 || fail "系统缺少 useradd"
+	command -v systemctl >/dev/null 2>&1 || fail "系统缺少 systemctl"
+	command -v useradd >/dev/null 2>&1 || fail "系统缺少 useradd"
 
   local was_active="false"
   if systemctl is-active --quiet homestack-control.service; then
@@ -158,12 +177,15 @@ install_control() {
   fi
 
   echo "HomeStack Control $release_tag 已安装。"
-  echo "请完成 /etc/homestack/control.env、HTTPS 证书、Pocket ID 与 Headscale 配置后再启用服务。"
+  echo "请完成 /etc/homestack/control.env、HTTPS 证书、至少一种登录方式与 Headscale 配置后再启用服务。"
 }
 
 install_agent() {
   [[ "$EUID" -ne 0 ]] || fail "Agent 必须以最终使用者身份运行，不能使用 root 或 sudo"
   command -v systemctl >/dev/null 2>&1 || fail "系统缺少 systemctl"
+  command -v sudo >/dev/null 2>&1 || fail "Agent 安装 root helper 需要 sudo"
+  command -v loginctl >/dev/null 2>&1 || fail "系统缺少 loginctl"
+  command -v tailscale >/dev/null 2>&1 || fail "系统缺少官方 tailscale 客户端"
 
   local config_dir="$HOME/.config/homestack"
   local state_dir="$HOME/.local/state/homestack"
@@ -180,6 +202,17 @@ install_agent() {
   install -m 0644 "$work_dir/archive/deploy/systemd/user/homestack-agent.service" "$service_dir/homestack-agent.service"
   printf '%s\n' "$version" > "$config_dir/agent-version"
 
+  [[ -f "$work_dir/archive/homestack-helper" ]] || fail "Agent Release 缺少 homestack-helper"
+  sed "s/REPLACE_WITH_AGENT_UID/$(id -u)/g" "$work_dir/archive/deploy/systemd/homestack-helper.service" > "$work_dir/homestack-helper.service"
+  sudo install -d -m 0755 /usr/local/libexec
+  sudo install -m 0755 "$work_dir/archive/homestack-helper" /usr/local/libexec/homestack-helper
+  sudo install -m 0644 "$work_dir/homestack-helper.service" /etc/systemd/system/homestack-helper.service
+  sudo systemctl daemon-reload
+  sudo systemctl enable homestack-helper.service
+  sudo systemctl restart homestack-helper.service
+  sudo loginctl enable-linger "$USER"
+  sudo tailscale set --operator="$USER"
+
   if [[ ! -e "$config_dir/agent.env" ]]; then
     sed "s|/home/REPLACE_WITH_USER|$HOME|g" "$work_dir/archive/deploy/env/agent.env.example" > "$work_dir/agent.env"
     install -m 0600 "$work_dir/agent.env" "$config_dir/agent.env"
@@ -191,7 +224,7 @@ install_agent() {
   fi
 
   echo "HomeStack Agent $release_tag 已安装。"
-  echo "请先通过桌面端加入设备并配置受信任 HTTPS 证书，再启用用户服务。"
+  echo "请执行桌面端生成的 enroll 命令，并用 systemd-creds encrypt --uid=self 分别创建 tls.crt 与 tls.key 后再启用用户服务。"
 }
 
 case "$component" in

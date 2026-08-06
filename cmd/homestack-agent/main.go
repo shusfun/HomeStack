@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -26,7 +27,19 @@ import (
 
 func main() {
 	if buildinfo.Requested(os.Args[1:]) {
-		fmt.Println(buildinfo.String("homestack-agent"))
+		fmt.Println(buildinfo.Output("homestack-agent", os.Args[1:]))
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "enroll" {
+		if err := enroll(os.Args[2:]); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "update-helper" {
+		if err := runUpdateHelper(os.Args[2:]); err != nil {
+			log.Fatal(err)
+		}
 		return
 	}
 	if err := run(); err != nil {
@@ -41,7 +54,7 @@ func run() error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	profile, err := securestore.LoadDeviceProfile()
+	profile, err := loadSystemdCredentialProfile()
 	if err != nil {
 		return err
 	}
@@ -73,9 +86,6 @@ func run() error {
 		return errors.New("Control 未提供有效的最新设备配置")
 	}
 	profile.SignedConfig = configStore.Signed()
-	if err := securestore.SaveDeviceProfile(profile); err != nil {
-		return err
-	}
 	sessions, err := agent.OpenSessionStore(
 		filepath.Join(settings.stateDir, "used-tickets.json"), profile.DeviceID, config.ControlURL,
 		ed25519.PublicKey(publicKeyBytes), profile.ControlKeyID,
@@ -93,9 +103,13 @@ func run() error {
 	if err := tailnet.VerifyNetworkPolicy(ctx); err != nil {
 		return err
 	}
+	updater, err := agent.NewAgentUpdater(buildinfo.AgentUpdateManifestURL, buildinfo.UpdatePublicKey, config.AgentURL)
+	if err != nil {
+		return err
+	}
 	agentServer, err := agent.NewServer(agent.ServerOptions{
 		DeviceID: profile.DeviceID, DeviceName: profile.DeviceName, ConfigStore: configStore,
-		Sessions: sessions, Tailnet: tailnet, ModuleSecrets: profile.Credential.ModuleSecrets,
+		Sessions: sessions, Tailnet: tailnet, ModuleSecrets: profile.Credential.ModuleSecrets, Updater: updater,
 	})
 	if err != nil {
 		return err
@@ -116,6 +130,25 @@ func run() error {
 	go heartbeatLoop(ctx, controlClient, configStore, agentServer)
 	log.Printf("HomeStack Agent 正在监听 %s", settings.address)
 	return agent.ServeTLS(ctx, settings.address, settings.tlsCert, settings.tlsKey, agentServer.Handler(web.Handler()))
+}
+
+func loadSystemdCredentialProfile() (securestore.DeviceProfile, error) {
+	directory := os.Getenv("CREDENTIALS_DIRECTORY")
+	if directory == "" {
+		return securestore.DeviceProfile{}, errors.New("systemd 未注入 CREDENTIALS_DIRECTORY")
+	}
+	data, err := os.ReadFile(filepath.Join(directory, "homestack-agent-profile"))
+	if err != nil {
+		return securestore.DeviceProfile{}, fmt.Errorf("读取 systemd-creds 设备档案失败: %w", err)
+	}
+	var profile securestore.DeviceProfile
+	if err := json.Unmarshal(data, &profile); err != nil {
+		return securestore.DeviceProfile{}, fmt.Errorf("解析 systemd-creds 设备档案失败: %w", err)
+	}
+	if profile.DeviceID == "" || profile.DeviceName == "" || profile.ControlKeyID == "" || profile.ControlPublicKey == "" || profile.SignedConfig == "" || profile.Credential.DeviceToken == "" {
+		return securestore.DeviceProfile{}, errors.New("systemd-creds 设备档案不完整")
+	}
+	return profile, nil
 }
 
 type agentSettings struct {

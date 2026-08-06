@@ -78,14 +78,16 @@ func NewJellyfinProxy(rawBaseURL, apiKey string) (http.Handler, error) {
 func jellyfinRequestAllowed(request *http.Request) bool {
 	path := strings.ToLower(request.URL.Path)
 	if request.Method == http.MethodGet || request.Method == http.MethodHead {
-		return strings.HasPrefix(path, "/items") || strings.HasPrefix(path, "/users") ||
-			strings.HasPrefix(path, "/videos/") || strings.HasPrefix(path, "/audio/") ||
-			strings.HasPrefix(path, "/livevideos/") || strings.HasPrefix(path, "/system/info/public") ||
-			strings.HasPrefix(path, "/branding/configuration")
+		return path == "/items" || strings.HasPrefix(path, "/items/") || path == "/users" || strings.HasPrefix(path, "/users/") ||
+			strings.HasPrefix(path, "/videos/") || strings.HasPrefix(path, "/audio/") || strings.HasPrefix(path, "/livevideos/") ||
+			path == "/system/info/public" || path == "/branding/configuration"
 	}
 	if request.Method == http.MethodPost {
-		return strings.HasSuffix(path, "/playbackinfo") || strings.HasSuffix(path, "/playing") ||
-			strings.Contains(path, "/playing/progress") || strings.HasSuffix(path, "/playing/stopped")
+		if path == "/sessions/playing" || path == "/sessions/playing/progress" || path == "/sessions/playing/stopped" {
+			return true
+		}
+		parts := strings.Split(strings.Trim(path, "/"), "/")
+		return len(parts) == 3 && parts[0] == "items" && parts[1] != "" && parts[2] == "playbackinfo"
 	}
 	return false
 }

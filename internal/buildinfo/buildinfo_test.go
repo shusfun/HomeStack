@@ -1,15 +1,33 @@
 package buildinfo
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 func TestRequested(t *testing.T) {
-	for _, argument := range []string{"version", "--version", "-v"} {
+	for _, argument := range []string{"version", "--version", "-v", "--version-json"} {
 		if !Requested([]string{argument}) {
 			t.Fatalf("应识别版本参数 %q", argument)
 		}
 	}
 	if Requested(nil) || Requested([]string{"--version", "extra"}) || Requested([]string{"--help"}) {
 		t.Fatal("不应把其他参数识别为版本请求")
+	}
+}
+
+func TestVersionJSON(t *testing.T) {
+	oldVersion := Version
+	t.Cleanup(func() { Version = oldVersion })
+	Version = "1.2.3"
+	var value struct {
+		Name, Version, GOOS, GOARCH string
+	}
+	if err := json.Unmarshal([]byte(Output("homestack-agent", []string{"--version-json"})), &value); err != nil {
+		t.Fatal(err)
+	}
+	if value.Name != "homestack-agent" || value.Version != "1.2.3" || value.GOOS == "" || value.GOARCH == "" {
+		t.Fatalf("版本 JSON 不完整: %+v", value)
 	}
 }
 

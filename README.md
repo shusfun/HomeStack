@@ -1,29 +1,30 @@
 # HomeStack
 
-HomeStack 是一个 Wails 3 多端 NAS 与远程开发整合器。公网 VPS 只承担 Passkey 身份、设备注册、签名配置和 Headscale 协调；文件、下载和媒体流优先通过 Tailscale/WireGuard 点对点传输，无法直连时仅使用自有 DERP。
+HomeStack 用官方 Tailscale 连接桌面、手机和 Linux 设备。公网 VPS 只运行 Control、Headscale 和自有 DERP：登录、设备登记、心跳、配对码和访问票据经过 Control；文件、影视、日志和设备管理由浏览器直接访问 Agent Tailnet HTTPS 地址，优先 WireGuard 点对点，无法打洞时只经过自有 DERP。
 
 首版范围：
 
-- Windows、macOS、Linux Wails 桌面端，粘贴一次性连接信息后加入。
-- 响应式 Control 与 Agent 网页，手机通过官方 Tailscale 客户端访问。
-- 设备状态、只读文件浏览/下载、Jellyfin 媒体和企业微信 cc-connect。
-- 不包含写文件、远程终端、远程桌面、出口节点或代理节点。
+- Windows、macOS、Linux 极简 Wails App，只负责登录、Tailnet 状态、设备列表、Linux 配对和用默认浏览器打开设备。
+- 单人所有者模型，支持 Pocket ID OIDC Passkey、Google OIDC 和 GitHub OAuth；同邮箱不会自动合并身份。
+- Linux Agent 网页提供状态、文件、Jellyfin 日常播放、资源监控、固定服务、受限日志和签名更新。
+- 不提供写文件、任意命令、Web Shell、远程桌面、出口节点、子网路由或代理节点。
 
 ## 仓库结构
 
 ```text
-cmd/homestack-desktop  Wails 桌面端
-cmd/homestack-agent    设备端只读 BFF
+cmd/homestack-desktop  极简 Wails 设备连接器
+cmd/homestack-agent    Linux 设备 BFF 与事务更新器
 cmd/homestack-control  公网身份与控制服务
-internal/              共用协议、安全与领域代码
-frontend/              React/TypeScript/Tailwind 单一前端
+cmd/homestack-helper   Linux 最小特权 systemd helper
+internal/              协议、安全、认证与领域代码
+frontend/              desktop/control/agent 三个独立界面入口
 deploy/                systemd、Headscale 和组件配置样例
-docs/                  部署、安全模型与验收清单
+docs/                  部署、安全、发布与验收文档
 ```
 
 ## 本地开发
 
-要求 Node `26.6.0`、pnpm `10.32.1`、Go `1.26.1`。仓库固定 `GOPROXY=https://goproxy.cn` 和 `registry=https://registry.npmmirror.com/`，没有下载源降级。
+要求 Node `26.6.0`、pnpm `10.32.1`、Go `1.26.1`。仓库固定 Go 与 npm 下载源，不做失败后的隐式源降级。
 
 ```bash
 pnpm install --frozen-lockfile
@@ -31,41 +32,28 @@ go mod download
 GOENV=./go.env go tool wails3 task dev
 ```
 
-Wails 开发模式会在本机回环地址启动 Vite；这只用于本机开发，不是生产服务。生产 Control、Pocket ID、Headscale 和 Agent 均要求 HTTPS。
+Wails 开发模式仅在本机回环地址启动 Vite。生产 Control 和 Agent 均要求受信任 HTTPS；不要把 Agent `9443` 暴露到公网。
 
-部署从 [docs/deployment.md](docs/deployment.md) 开始，固定组件版本见 [docs/versions.md](docs/versions.md)，威胁边界见 [docs/security.md](docs/security.md)。
+## Linux 安装
 
-## Linux 一键安装
-
-安装脚本从 GitHub Release 下载固定产物并强制验证 `checksums.txt`。它只安装 HomeStack 自身，不会安装或升级 Headscale、Pocket ID、Tailscale、FileBrowser、Jellyfin 或 cc-connect。
-
-Control 必须以 root 安装：
+安装器直接从 GitHub Release 下载，并同时验证 SHA-256 和 `Ed25519(Sign(SHA-256(asset)))`。更新公钥必须通过可信渠道取得；`checksums.txt` 不是信任根。
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/shusfun/HomeStack/main/deploy/install.sh | sudo bash -s -- control
+UPDATE_PUBLIC_KEY='REPLACE_WITH_BASE64_ED25519_PUBLIC_KEY'
+curl -fsSL https://raw.githubusercontent.com/shusfun/HomeStack/main/deploy/install.sh \
+  | sudo bash -s -- control --update-public-key "$UPDATE_PUBLIC_KEY"
+
+curl -fsSL https://raw.githubusercontent.com/shusfun/HomeStack/main/deploy/install.sh \
+  | bash -s -- agent --update-public-key "$UPDATE_PUBLIC_KEY"
 ```
 
-Agent 必须以最终使用者身份安装，不得使用 `sudo`：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/shusfun/HomeStack/main/deploy/install.sh | bash -s -- agent
-```
-
-安装指定版本或升级现有服务：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/shusfun/HomeStack/main/deploy/install.sh | sudo bash -s -- upgrade control --version v0.1.3
-curl -fsSL https://raw.githubusercontent.com/shusfun/HomeStack/main/deploy/install.sh | bash -s -- upgrade agent --version v0.1.3
-```
-
-脚本不会启动尚未完成 HTTPS、身份或设备档案配置的全新服务。Release 与本地打包说明见 [docs/release.md](docs/release.md)。
+Control 以 root 安装；Agent 脚本必须以最终普通用户运行，并仅在安装固定 root helper、启用 linger 和设置 Tailscale operator 时调用 `sudo`。脚本不会安装或升级 Headscale、Pocket ID、Tailscale、FileBrowser、Jellyfin 或 cc-connect。
 
 ## 连接流程
 
-管理员在 Control 生成以下一次性连接信息：
+1. 第一个成功登录 Control 的身份成为唯一所有者；公网首次开放后必须立即完成认领。
+2. App 使用系统浏览器和回环 PKCE 登录，通过官方 Tailscale 客户端加入 Tailnet。
+3. App 或 Control 生成十分钟单次 Linux 配对命令，Agent 将密封档案写入 `systemd-creds`。
+4. 打开设备时 App 向 Control 领取三十秒单次票据，再让系统默认浏览器访问 Agent `/access`；最终地址栏停留在设备 Tailnet 域名。
 
-```text
-homestack://join?server=https://app.example.com:8443&code=<一次性随机码>
-```
-
-桌面端粘贴并点击“连接”，随后完成 Pocket ID Passkey 登录。邀请码十分钟失效且只能兑换一次，不携带长期密钥。设备密钥保存在系统安全存储中，不提供明文文件降级。
+部署见 [docs/deployment.md](docs/deployment.md)，安全边界见 [docs/security.md](docs/security.md)，发布资产见 [docs/release.md](docs/release.md)。
