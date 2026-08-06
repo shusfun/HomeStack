@@ -134,7 +134,7 @@ package_windows() {
   command -v powershell.exe >/dev/null 2>&1 || { echo "Windows 打包缺少 powershell.exe" >&2; exit 1; }
   command -v cygpath >/dev/null 2>&1 || { echo "Windows Git Bash 缺少 cygpath" >&2; exit 1; }
   local portable="$stage/portable" update="$stage/update" assets="$stage/assets"
-  mkdir -p "$portable" "$update" "$assets"
+  mkdir -p "$portable" "$update" "$assets" "$stage/bin"
   cp "$stage/HomeStack.exe" "$portable/HomeStack.exe"
   cp README.md "$portable/README.md"
   cp "$stage/HomeStack.exe" "$update/HomeStack.exe"
@@ -156,7 +156,7 @@ package_windows() {
   makensis -DWAILS_INSTALL_SCOPE=user -DREQUEST_EXECUTION_LEVEL=user \
     "-DARG_WAILS_${arch_flag}_BINARY=$binary_win" "$nsis_project_win"
   local installer
-  installer=$(find "$assets/bin" -maxdepth 1 -type f -iname '*installer*.exe' -print -quit)
+  installer=$(find "$stage/bin" -maxdepth 1 -type f -iname '*installer*.exe' -print -quit)
   [[ -n "$installer" ]] || { echo "Wails NSIS 未生成安装器" >&2; exit 1; }
   cp "$installer" "$output_dir/HomeStack_${version}_windows_${target_arch}_setup.exe"
 }
@@ -168,7 +168,7 @@ package_linux_desktop() {
   go tool wails3 generate build-assets -silent -dir "$assets" -name HomeStack -binaryname HomeStack \
     -productname HomeStack -productcompany HomeStack -productidentifier dev.homestack.desktop \
     -productdescription "HomeStack device connector" -productversion "$package_version" -productcopyright "Copyright 2026 HomeStack"
-  go tool wails3 generate .desktop -name HomeStack -exec HomeStack -icon homestack -outputfile "$appimage_build/HomeStack.desktop" -categories "Utility;Network;"
+  go tool wails3 generate .desktop -name HomeStack -exec HomeStack -icon appicon -outputfile "$appimage_build/HomeStack.desktop" -categories "Utility;Network;"
   go tool wails3 generate appimage -binary "$stage/HomeStack" -icon "$assets/appicon.png" \
     -desktopfile "$appimage_build/HomeStack.desktop" -outputdir "$output_dir" -builddir "$appimage_build/build"
   local generated_appimage
