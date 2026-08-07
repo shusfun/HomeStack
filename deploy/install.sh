@@ -84,7 +84,7 @@ case "$(uname -m)" in
   *) fail "不支持的处理器架构: $(uname -m)" ;;
 esac
 
-for dependency in curl tar sha256sum awk grep install mktemp sed openssl base64 wc; do
+for dependency in curl tar grep install mktemp sed openssl base64 wc; do
   command -v "$dependency" >/dev/null 2>&1 || fail "缺少命令: $dependency"
 done
 [[ -n "$update_public_key" ]] || fail "必须通过 --update-public-key 或 HOMESTACK_UPDATE_PUBLIC_KEY 提供 Ed25519 公钥"
@@ -120,11 +120,7 @@ trap 'rm -rf -- "$work_dir"' EXIT
 echo "下载 HomeStack $component $release_tag ($arch)"
 curl -fL --retry 3 --connect-timeout 10 -o "$work_dir/$asset" "$release_base/$asset"
 curl -fL --retry 3 --connect-timeout 10 -o "$work_dir/$asset.sig" "$release_base/$asset.sig"
-curl -fL --retry 3 --connect-timeout 10 -o "$work_dir/checksums.txt" "$release_base/checksums.txt"
 
-expected_checksum=$(awk -v name="$asset" '$2 == name || $2 == "*" name { print $1 }' "$work_dir/checksums.txt")
-[[ "$expected_checksum" =~ ^[a-fA-F0-9]{64}$ ]] || fail "checksums.txt 中缺少 $asset 的 SHA-256"
-printf '%s  %s\n' "$expected_checksum" "$work_dir/$asset" | sha256sum -c - >/dev/null || fail "Release 文件 SHA-256 校验失败"
 printf '\x30\x2a\x30\x05\x06\x03\x2b\x65\x70\x03\x21\x00' > "$work_dir/update-public.der"
 printf '%s' "$update_public_key" | base64 -d >> "$work_dir/update-public.der" 2>/dev/null || fail "Ed25519 公钥不是有效 base64"
 [[ "$(wc -c < "$work_dir/update-public.der")" -eq 44 ]] || fail "Ed25519 公钥必须为 32 字节"

@@ -8,9 +8,9 @@ GitHub Actions 只发布已存在且符合 `vX.Y.Z` 的标签。测试通过后�
 - Windows amd64/arm64：当前用户范围 NSIS `_setup.exe`、`_portable.zip`，以及只含单顶层 `HomeStack.exe` 的 `_update.zip`。
 - Linux amd64/arm64：AppImage 和 `.deb`。
 - Linux amd64/arm64：Control、Agent 安装 `.tar.gz`，以及 Agent 单文件更新 `.tar.gz`。
-- 每个资产的 `.sig`、`checksums.txt`、`checksums.txt.sig`、Wails schema `latest.json` 和 `latest.json.sig`。
+- 参考 CC Switch，只为自动安装或更新实际消费的 12 个载荷发布 `.sig`，并发布内嵌更新签名的 Wails schema `latest.json`；连同 20 个基础载荷共 33 个 Release 资产。
 
-`latest.json` 有 6 个 desktop 更新项和 2 个架构各自对应的 Agent 更新项，共 10 项。Wails 对同平台/架构选择首个资产，因此生成器显式保证 desktop 项排在 Agent 项之前。
+`latest.json` 有 6 个 desktop 更新项和 2 个架构各自对应的 Agent 更新项，共 8 项。Wails 对同平台/架构选择首个资产，因此生成器显式保证 desktop 项排在 Agent 项之前。
 
 ## 签名门禁
 

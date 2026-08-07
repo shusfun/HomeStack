@@ -318,7 +318,7 @@ jobs:
           check-latest: false
           cache: false
 
-      - name: 生成签名、SHA-256 清单与 latest.json
+      - name: 生成安装更新签名与 latest.json
         shell: bash
         env:
           UPDATE_PRIVATE_KEY: ${{ secrets.HOMESTACK_UPDATE_PRIVATE_KEY }}
@@ -331,8 +331,10 @@ jobs:
             --private-key "$UPDATE_PRIVATE_KEY" \
             --public-key "$UPDATE_PUBLIC_KEY"
           test -s dist/latest.json
-          test -s dist/latest.json.sig
-          test -s dist/checksums.txt
+          signature_count=$(find dist -maxdepth 1 -type f -name '*.sig' | wc -l)
+          test "$signature_count" -eq 12
+          test ! -e dist/latest.json.sig
+          test ! -e dist/checksums.txt
 
       - name: 创建 GitHub Release
         shell: bash
@@ -349,15 +351,19 @@ jobs:
           curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/deploy/install.sh | sudo bash -s -- control --version "$RELEASE_TAG" --update-public-key "$UPDATE_PUBLIC_KEY"
           \`\`\`
 
+          安装脚本会在写入系统前计算资产 SHA256，并使用所提供公钥验证 Ed25519 签名。
+
           Linux Agent 一键安装：
 
           \`\`\`bash
           curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/deploy/install.sh | bash -s -- agent --version "$RELEASE_TAG" --update-public-key "$UPDATE_PUBLIC_KEY"
           \`\`\`
 
+          安装脚本会在写入系统前计算资产 SHA256，并使用所提供公钥验证 Ed25519 签名。
+
           桌面端推荐安装包：macOS 使用对应架构的 \`.dmg\`，Windows 使用当前用户范围的 \`_setup.exe\`，Linux 使用 AppImage 或 deb。
 
-          自动更新与 Agent 更新直接从本 Release 下载，使用客户端内置的 Ed25519 公钥验证，不经过 HomeStack VPS。\`checksums.txt\` 仅用于人工核验，不是更新信任根。
+          自动安装与更新直接从本 Release 下载，使用客户端内置或安装时提供的 Ed25519 公钥验证，不经过 HomeStack VPS。仅自动安装器和更新器实际消费的载荷附带 \`.sig\`。
 
           当前 macOS 仅使用 ad-hoc codesign 且未公证，Windows 未做 Authenticode；Gatekeeper 或 SmartScreen 可能显示来源警告。
           EOF

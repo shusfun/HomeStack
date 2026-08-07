@@ -9,7 +9,6 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -57,7 +56,13 @@ func main() {
 	}
 	names := make([]string, 0, len(entries))
 	for _, entry := range entries {
-		if !entry.Type().IsRegular() || strings.HasSuffix(entry.Name(), ".sig") || entry.Name() == "checksums.txt" || entry.Name() == "latest.json" {
+		if !entry.Type().IsRegular() {
+			continue
+		}
+		if strings.HasSuffix(entry.Name(), ".sig") || entry.Name() == "checksums.txt" || entry.Name() == "latest.json" {
+			if err := os.Remove(filepath.Join(*dist, entry.Name())); err != nil {
+				fatal(fmt.Errorf("清理旧发布元数据失败: %w", err))
+			}
 			continue
 		}
 		names = append(names, entry.Name())
@@ -66,7 +71,6 @@ func main() {
 	version := strings.TrimPrefix(*tag, "v")
 	validateAssetSet(names, version)
 	artifacts := make([]artifact, 0, 8)
-	checksumLines := make([]string, 0, len(names))
 	for _, name := range names {
 		path := filepath.Join(*dist, name)
 		if err := validateUpdateArchive(path, name); err != nil {
@@ -78,12 +82,12 @@ func main() {
 		}
 		digest := sha256.Sum256(data)
 		signature := ed25519.Sign(ed25519.PrivateKey(privateKey), digest[:])
-		if err := os.WriteFile(path+".sig", []byte(base64.StdEncoding.EncodeToString(signature)+"\n"), 0o644); err != nil {
-			fatal(err)
-		}
-		checksumLines = append(checksumLines, hex.EncodeToString(digest[:])+"  "+name)
-		if current, ok := manifestArtifact(name, version, *repository, *tag, int64(len(data)), digest[:], signature); ok {
+		current, updateAsset := manifestArtifact(name, version, *repository, *tag, int64(len(data)), digest[:], signature)
+		if updateAsset {
 			artifacts = append(artifacts, current)
+		}
+		if updateAsset || isInstallerAsset(name, version) {
+			writeDetachedSignature(path, signature)
 		}
 	}
 	if len(artifacts) != 8 {
@@ -99,8 +103,6 @@ func main() {
 		}
 		return artifacts[left].Arch < artifacts[right].Arch
 	})
-	checksums := []byte(strings.Join(checksumLines, "\n") + "\n")
-	writeSigned(filepath.Join(*dist, "checksums.txt"), checksums, ed25519.PrivateKey(privateKey))
 	manifest := map[string]any{
 		"schemaVersion": 1, "version": version, "channel": "stable", "name": "HomeStack " + version,
 		"publishedAt": time.Now().UTC().Format(time.RFC3339), "notes": "请查看 GitHub Release 更新说明。", "artifacts": artifacts,
@@ -110,7 +112,9 @@ func main() {
 		fatal(err)
 	}
 	manifestData = append(manifestData, '\n')
-	writeSigned(filepath.Join(*dist, "latest.json"), manifestData, ed25519.PrivateKey(privateKey))
+	if err := os.WriteFile(filepath.Join(*dist, "latest.json"), manifestData, 0o644); err != nil {
+		fatal(err)
+	}
 }
 
 func validateUpdateArchive(path, name string) error {
@@ -222,11 +226,16 @@ func manifestArtifact(name, version, repository, tag string, size int64, digest,
 	return artifact{}, false
 }
 
-func writeSigned(path string, data []byte, privateKey ed25519.PrivateKey) {
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		fatal(err)
+func isInstallerAsset(name, version string) bool {
+	for _, arch := range []string{"amd64", "arm64"} {
+		if name == "homestack-control_"+version+"_linux_"+arch+".tar.gz" || name == "homestack-agent_"+version+"_linux_"+arch+".tar.gz" {
+			return true
+		}
 	}
-	signature := ed25519.Sign(privateKey, data)
+	return false
+}
+
+func writeDetachedSignature(path string, signature []byte) {
 	if err := os.WriteFile(path+".sig", []byte(base64.StdEncoding.EncodeToString(signature)+"\n"), 0o644); err != nil {
 		fatal(err)
 	}

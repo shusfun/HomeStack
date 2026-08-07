@@ -8,6 +8,7 @@ import (
 	"compress/gzip"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"flag"
@@ -57,14 +58,62 @@ func TestReleaseManifest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	signatures := 0
-	for _, entry := range entries {
-		if strings.HasSuffix(entry.Name(), ".sig") {
-			signatures++
+	expectedSignatures := map[string]bool{}
+	for _, current := range manifest.Artifacts {
+		expectedSignatures[current.Filename+".sig"] = true
+		signatureData, readErr := os.ReadFile(filepath.Join(dist, current.Filename+".sig"))
+		if readErr != nil {
+			t.Fatalf("更新资产缺少旁路签名 %s: %v", current.Filename, readErr)
+		}
+		if strings.TrimSpace(string(signatureData)) != current.Signature {
+			t.Fatalf("更新资产旁路签名与 latest.json 不一致: %s", current.Filename)
 		}
 	}
-	if signatures != 22 {
-		t.Fatalf("签名文件数量错误: %d", signatures)
+	for _, arch := range []string{"amd64", "arm64"} {
+		for _, component := range []string{"control", "agent"} {
+			expectedSignatures["homestack-"+component+"_1.2.3_linux_"+arch+".tar.gz.sig"] = true
+		}
+	}
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".sig") {
+			if !expectedSignatures[entry.Name()] {
+				t.Fatalf("不应发布旁路签名: %s", entry.Name())
+			}
+			verifyDetachedSignature(t, dist, entry.Name(), publicKey)
+			delete(expectedSignatures, entry.Name())
+		}
+	}
+	if len(expectedSignatures) != 0 {
+		t.Fatalf("缺少旁路签名: %v", expectedSignatures)
+	}
+	if len(entries) != 33 {
+		t.Fatalf("发布文件数量错误: %d", len(entries))
+	}
+	for _, name := range []string{"checksums.txt", "checksums.txt.sig", "latest.json.sig"} {
+		if _, statErr := os.Stat(filepath.Join(dist, name)); !os.IsNotExist(statErr) {
+			t.Fatalf("不应生成 %s: %v", name, statErr)
+		}
+	}
+}
+
+func verifyDetachedSignature(t *testing.T, dist, signatureName string, publicKey ed25519.PublicKey) {
+	t.Helper()
+	assetName := strings.TrimSuffix(signatureName, ".sig")
+	assetData, err := os.ReadFile(filepath.Join(dist, assetName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	signatureData, err := os.ReadFile(filepath.Join(dist, signatureName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(signatureData)))
+	if err != nil {
+		t.Fatalf("旁路签名编码无效 %s: %v", signatureName, err)
+	}
+	digest := sha256.Sum256(assetData)
+	if !ed25519.Verify(publicKey, digest[:], signature) {
+		t.Fatalf("旁路签名校验失败: %s", signatureName)
 	}
 }
 

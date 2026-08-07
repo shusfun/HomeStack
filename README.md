@@ -36,7 +36,7 @@ Wails 开发模式仅在本机回环地址启动 Vite。生产 Control 和 Agent
 
 ## Linux 安装
 
-安装器直接从 GitHub Release 下载，并同时验证 SHA-256 和 `Ed25519(Sign(SHA-256(asset)))`。更新公钥必须通过可信渠道取得；`checksums.txt` 不是信任根。
+安装器直接从 GitHub Release 下载，自行计算 SHA-256，并验证 `Ed25519(Sign(SHA-256(asset)))`。更新公钥必须通过可信渠道取得。
 
 ```bash
 UPDATE_PUBLIC_KEY='REPLACE_WITH_BASE64_ED25519_PUBLIC_KEY'
