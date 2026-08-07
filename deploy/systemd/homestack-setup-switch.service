@@ -1,0 +1,25 @@
+[Unit]
+Description=Switch HomeStack from setup to control
+After=headscale.service homestack-setup-helper.service
+Requires=headscale.service homestack-setup-helper.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStartPre=/bin/sleep 2
+ExecStart=/usr/local/libexec/homestack-setup-helper switch
+ExecStartPost=/bin/systemctl stop homestack-setup-helper.service
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ReadWritePaths=/etc/homestack /etc/headscale /etc/pocket-id /var/lib/homestack-setup /var/lib/headscale /var/lib/pocket-id

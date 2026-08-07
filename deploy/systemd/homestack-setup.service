@@ -1,0 +1,30 @@
+[Unit]
+Description=HomeStack first-run setup
+After=network-online.target homestack-setup-helper.service
+Wants=network-online.target
+Requires=homestack-setup-helper.service
+ConditionPathExists=!/var/lib/homestack-setup/completed.json
+
+[Service]
+Type=simple
+User=homestack-control
+Group=homestack-control
+ExecStart=/usr/local/bin/homestack-control setup --addr=127.0.0.1:8443 --token-hash=/etc/homestack/setup-token.sha256 --session=/etc/homestack/setup-session.json --socket=/run/homestack-setup/helper.sock
+Restart=on-failure
+RestartSec=5s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ReadWritePaths=/etc/homestack
+
+[Install]
+WantedBy=multi-user.target

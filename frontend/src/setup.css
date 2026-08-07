@@ -1,0 +1,26 @@
+.setup-shell, .setup-token { min-height: 100vh; background: #f4f6f7; color: #1d2529; }
+.setup-shell { padding: 32px 20px 56px; }
+.setup-shell > header { width: min(720px, 100%); height: 44px; margin: 0 auto; display: flex; align-items: center; gap: 10px; }
+.setup-shell > header div { display: grid; }
+.setup-shell > header span { color: #748087; font-size: 11px; }
+.setup-mark { width: 34px; height: 34px; }
+.setup-progress { width: min(460px, 80%); height: 32px; margin: 34px auto 24px; display: grid; grid-template-columns: repeat(4, 1fr); align-items: center; position: relative; }
+.setup-progress::before { content: ""; height: 2px; background: #d2dbde; position: absolute; left: 12%; right: 12%; }
+.setup-progress span { width: 28px; height: 28px; justify-self: center; z-index: 1; border: 2px solid #c7d2d5; border-radius: 50%; background: #f4f6f7; color: #748087; display: grid; place-items: center; font-size: 12px; font-weight: 700; }
+.setup-progress span.active { border-color: #176b57; background: #176b57; color: #fff; }
+.setup-panel { width: min(720px, 100%); margin: 0 auto; padding: 26px 0; }
+.setup-heading { margin-bottom: 24px; display: flex; align-items: center; gap: 12px; }
+.setup-heading > svg { color: #176b57; }
+.setup-heading h1 { font-size: 20px; }
+.setup-heading p { margin-top: 3px; color: #748087; font-size: 12px; }
+.setup-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 15px; }
+.setup-form label, .setup-token label { display: grid; gap: 7px; color: #56646a; font-size: 12px; font-weight: 650; }
+.setup-form label:last-of-type { grid-column: 1 / -1; }
+.setup-form button { grid-column: 1 / -1; justify-self: start; }
+.setup-token { padding: 18vh 20px 40px; text-align: center; }
+.setup-token-mark { width: 52px; height: 52px; margin: 0 auto 14px; }
+.setup-token form { width: min(390px, 100%); margin: 24px auto 0; display: grid; gap: 12px; text-align: left; }
+.setup-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.setup-finish { margin-top: 28px; }
+.setup-center { min-height: 300px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; color: #176b57; }
+@media (max-width: 640px) { .setup-shell { padding-inline: 14px; } .setup-form { grid-template-columns: 1fr; } .setup-form label:last-of-type, .setup-form button { grid-column: 1; } }

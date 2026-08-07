@@ -1,9 +1,11 @@
 server_url: https://mesh.example.com
-listen_addr: 0.0.0.0:443
+listen_addr: 127.0.0.1:18080
 metrics_listen_addr: null
 grpc_listen_addr: 127.0.0.1:50443
-grpc_allow_insecure: false
-trusted_proxies: []
+grpc_allow_insecure: true
+trusted_proxies:
+  - 127.0.0.1/32
+  - ::1/128
 
 noise:
   private_key_path: /var/lib/headscale/noise_private.key
@@ -53,11 +55,6 @@ database:
     write_ahead_log: true
     wal_autocheckpoint: 1000
 
-acme_url: https://acme-v02.api.letsencrypt.org/directory
-acme_email: REPLACE_WITH_ACME_EMAIL
-tls_letsencrypt_hostname: mesh.example.com
-tls_letsencrypt_cache_dir: /var/lib/headscale/cache
-tls_letsencrypt_challenge_type: TLS-ALPN-01
 tls_cert_path: ""
 tls_key_path: ""
 
@@ -84,7 +81,7 @@ unix_socket_permission: "0770"
 
 oidc:
   only_start_if_oidc_is_available: true
-  issuer: https://id.example.com:8444
+  issuer: https://id.example.com
   client_id: REPLACE_WITH_HEADSCALE_OIDC_CLIENT_ID
   client_secret_path: /etc/headscale/oidc-client-secret
   use_expiry_from_token: false

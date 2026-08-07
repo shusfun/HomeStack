@@ -18,6 +18,13 @@
 
 首个登录即所有者存在公网抢占窗口。首次部署必须在 Control 对公网开放后立即完成所有者登录。
 
+## Setup 与维护权限
+
+- 安装器只保存 256 位一次性 Setup 令牌的 SHA-256 摘要；首次成功兑换后立即删除摘要，Setup 会话摘要固定 24 小时且绑定 `Secure`、`HttpOnly` Cookie。
+- Setup Helper 只在完成标记不存在时运行，通过独立 Unix Socket 和 `SO_PEERCRED` 只接受 Control UID。下载 URL、版本、SHA-256、目标路径、命令和 systemd unit 全部固定。
+- Setup 完成后安装 API 永久返回 `423 setup_locked`，Setup Helper 停止。Maintenance Helper 使用另一 Socket，只能原子修改三套固定配置、管理临时 Pocket API Key并重启三个固定服务，不能下载或替换二进制、写 systemd unit。
+- 域名迁移必须由当前 Owner 使用 Pocket ID Passkey 重新认证；授权绑定当前浏览器会话，五分钟过期且单次使用。配置与 OIDC 回调在健康检查失败时从 root `0600` 快照回滚。
+
 ## 配对与访问
 
 - Linux 配对码使用安全随机数，十分钟过期且只能兑换一次；Headscale 预认证密钥同样短期、单次使用。

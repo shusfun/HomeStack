@@ -1,86 +1,73 @@
 # 原生部署
 
-本文档只给出显式安装步骤，不下载、不安装、不升级第三方组件。所有示例域名和 `REPLACE_WITH_*` 必须先替换，残留占位符视为部署失败。
+HomeStack Control 通过 GitHub Release 原生安装，不使用 Docker。首次安装会启动一次性 Setup，由 Setup Helper 安装并固定校验 Headscale `0.29.3` 与 Pocket ID `2.12.0`；任何下载、摘要或配置检查失败都会保留 Setup 状态并返回真实错误。
 
-## 1. 域名与端口
+## 1. DNS、端口与宝塔
 
-为 VPS 配置以下 DNS 记录：
+先为同一台 VPS 配置四个不重复的直连 DNS 记录。Control、Pocket ID、Headscale 的 DNS 必须直接解析到 VPS 公网 IPv4，不得启用 Cloudflare Proxy、Tunnel 或其他中间代理。
 
-| 地址 | 端口 | 服务 |
+宝塔负责公网 TLS，并配置以下 HTTP 反向代理：
+
+| 公网域名 | 宝塔上游 | 说明 |
 | --- | --- | --- |
-| `mesh.example.com` | TCP 443、UDP 3478 | Headscale、DERP、STUN |
-| `app.example.com` | TCP 8443 | HomeStack Control |
-| `id.example.com` | TCP 8444 | Pocket ID |
+| `app.example.com` | `http://127.0.0.1:8443` | HomeStack Control 与首次 Setup |
+| `id.example.com` | `http://127.0.0.1:8444` | Pocket ID |
+| `mesh.example.com` | `http://127.0.0.1:18080` | Headscale HTTP 与 WebSocket |
 
-防火墙只开放上表端口。不要开放 Headscale gRPC、metrics、FileBrowser、Jellyfin 或 cc-connect 端口。Headscale 使用内置 ACME TLS-ALPN-01；Control 与 Pocket ID 使用你通过 DNS-01 或其他受控方式签发的证书。
+Headscale 站点必须透传 `Upgrade`/`Connection` WebSocket 请求头并关闭代理缓冲。`127.0.0.1:50443` 是 Headscale gRPC，只供本机 Control 使用，不配置宝塔反代。
 
-每台设备另准备仅解析到其 Tailscale IP 的名称，例如 `nas.tail.example.com -> 100.64.0.10`，并通过 DNS-01 签发受系统信任的证书。该名称只用于 Agent HTTPS，不应把 Agent 端口暴露到公网。
+公网防火墙只开放 TCP `80/443` 和 UDP `3478`。不得开放 TCP `8443`、`8444`、`18080`、`50443`。Tailnet 基础域名（例如 `tail.example.com`）用于设备名称，不作为 VPS 后端端口。
 
-## 2. Pocket ID
+## 2. 安装与 Setup
 
-1. 从官方发布页安装 Pocket ID `v2.12.0` 到 `/usr/local/bin/pocket-id`，先核对发布校验值并运行 `pocket-id version`。
-2. 创建专用 `pocket-id` 用户，将 [deploy/systemd/pocket-id.service](../deploy/systemd/pocket-id.service) 安装到 `/etc/systemd/system/`。
-3. 将 [deploy/env/pocket-id.env.example](../deploy/env/pocket-id.env.example) 安装为权限 `0600` 的 `/etc/pocket-id/pocket-id.env`，证书与私钥仅授权该用户读取。
-4. `ENCRYPTION_KEY_FILE` 指向至少 16 字节的独立随机密钥文件。禁止把密钥写进 unit 或提交到仓库。
-5. 创建 HomeStack OIDC 客户端。HomeStack 自身采用单人所有者模型，不依赖 Pocket ID 用户组或管理员组。
-
-创建两个 OIDC 客户端：
-
-| 客户端 | 类型 | PKCE | 回调地址 |
-| --- | --- | --- | --- |
-| HomeStack | Confidential | S256 | `https://app.example.com:8443/auth/callback/pocket` |
-| Headscale | Confidential | S256 | `https://mesh.example.com/oidc/callback` |
-
-App 回环地址由 Control 自己处理，不注册到 Pocket ID。Google 回调为 `/auth/callback/google`，GitHub 回调为 `/auth/callback/github`。
-
-## 3. Headscale 与自有 DERP
-
-1. 从官方发布页安装 Headscale `v0.29.3`，核对校验值并运行 `headscale version`。
-2. 将 [deploy/headscale/config.yaml](../deploy/headscale/config.yaml) 和 [deploy/headscale/policy.hujson](../deploy/headscale/policy.hujson) 安装到 `/etc/headscale/`。
-3. 替换域名、VPS 公网 IPv4、ACME 邮箱、OIDC Client ID，把 Pocket ID 客户端密钥写入权限 `0640` 的 `/etc/headscale/oidc-client-secret`。
-4. 安装 [deploy/systemd/headscale.service](../deploy/systemd/headscale.service)，运行 `headscale configtest --config /etc/headscale/config.yaml` 和 `headscale policy check --config /etc/headscale/config.yaml --bypass`，两者必须成功。
-5. 确认 `tailscale debug derp-map` 只有 `homestack` 区域，不含公共 DERP。
-
-策略只开放本人设备 TCP `9443`。不要加入 `autogroup:internet`、`*:*`、子网路由或出口节点授权。
-
-## 4. HomeStack Control
-
-可在安装完 Headscale 与 Pocket ID 后使用 Release 一键安装 HomeStack 自身：
+使用 Release 验签公钥运行官方安装器：
 
 ```bash
 UPDATE_PUBLIC_KEY='REPLACE_WITH_BASE64_ED25519_PUBLIC_KEY'
-curl -fsSL https://raw.githubusercontent.com/shusfun/HomeStack/main/deploy/install.sh | sudo bash -s -- control --update-public-key "$UPDATE_PUBLIC_KEY"
+curl -fsSL https://raw.githubusercontent.com/shusfun/HomeStack/v0.1.8/deploy/install.sh | \
+  sudo bash -s -- control --version v0.1.8 --update-public-key "$UPDATE_PUBLIC_KEY"
 ```
 
-安装器会校验 Release SHA-256 与 Ed25519 签名、安装二进制和 systemd unit、创建 Control 签名密钥，但不会启动残留占位符的服务，也不会安装任何外部组件。
+安装器会校验 Control Release 的 Ed25519 签名、内嵌版本和架构，保留已有 Control 签名密钥，并在首次安装时输出 256 位一次性 Setup 令牌。令牌只保存 SHA-256 摘要，首次成功兑换后立即删除；Setup 会话固定有效 24 小时且重启后仍不可重复兑换令牌。
 
-1. 使用一键安装器，或在受控构建机从本仓库构建 `homestack-control` 并安装到 `/usr/local/bin/`。
-2. 运行 `homestack-control keygen --private /etc/homestack/signing-private.key --public /etc/homestack/signing-public.key`。私钥权限必须为 `0600` 且离线备份。
-3. 将 [deploy/env/control.env.example](../deploy/env/control.env.example) 安装为 `/etc/homestack/control.env`，替换域名并完整配置至少一个 Pocket ID、Google 或 GitHub 登录方式。
-4. 安装 [deploy/systemd/homestack-control.service](../deploy/systemd/homestack-control.service)。Control 用户必须通过 `headscale` 组访问 `/run/headscale/headscale.sock`，不得开放远程 gRPC。
-5. 启动后只接受 `https://app.example.com:8443`，HTTP 请求不做重定向或降级。首次公网开放后立即登录；第一个成功登录者会成为唯一所有者。
+将宝塔 Control 站点指向 `http://127.0.0.1:8443`，打开 `https://app.example.com/setup` 并输入安装器输出的令牌。Setup 页面依次完成：
 
-## 5. 设备端
+1. 校验四个域名和 VPS 公网 IPv4。
+2. 安装并启动 Pocket ID，在 Pocket ID 原生 `/setup` 创建首个 Passkey 管理员。
+3. 创建受限用户组及 HomeStack、Headscale 两个 confidential PKCE S256 OIDC 客户端。
+4. 校验 Headscale policy/config 和 Control 配置，再切换到正式服务。
 
-1. 由用户确认后安装官方 Tailscale `v1.102.2`、FileBrowser Quantum `v0.3.5`、Jellyfin `v10.11.11` 和 cc-connect `v1.4.1`。HomeStack 不重新分发这些文件。
-2. FileBrowser 使用 [deploy/filebrowser/config.yaml](../deploy/filebrowser/config.yaml) 和 [deploy/systemd/filebrowser.service](../deploy/systemd/filebrowser.service)。共享根目录以只读方式提供，API Token 只授予 `api` 与 `download`。
-3. Jellyfin 必须只监听 `127.0.0.1:8096`，不得通过反向代理或公网防火墙暴露。
-4. 以最终使用者身份运行 Agent 安装器并传入更新公钥。安装器使用 `sudo` 安装固定 root helper、启用 linger，并将当前用户设为 Tailscale operator；不要对整个脚本使用 sudo。
-5. 将 [deploy/env/agent.env.example](../deploy/env/agent.env.example) 安装为权限 `0600` 的 `~/.config/homestack/agent.env`。监听地址必须是设备 Tailscale IP 和 `9443`。
-6. 用 DNS-01 为 Agent 域名签发可信证书，分别执行 `systemd-creds encrypt --uid=self --name=tls.crt fullchain.pem ~/.config/credstore.encrypted/tls.crt` 和对应的 `tls.key` 命令。
-7. 在 App 或 Control 填写设备名、Agent HTTPS 地址和模块信息，生成十分钟单次配对命令并在 Linux 上执行。命令加入 Tailnet，并把设备档案写入 `~/.config/credstore.encrypted/homestack-agent-profile`。
+Setup 完成后安装接口永久返回 `423 setup_locked`，一次性 Setup Helper 停止，权限更窄的 Maintenance Helper 启动。首次通过 Pocket ID 登录 Control 的用户认领唯一 Owner。
 
-手机首次在官方 Tailscale 客户端中把自定义协调服务器设为 `https://mesh.example.com` 并登录，随后使用浏览器访问 Control。业务访问票据会将浏览器直接带到设备 Agent 地址。
-
-## 6. 启动与检查
+Setup 未完成且令牌确实丢失时，root 可显式重置：
 
 ```bash
-systemctl enable --now pocket-id.service
-systemctl enable --now headscale.service
-systemctl enable --now homestack-control.service
-systemctl enable --now filebrowser.service
-systemctl enable --now homestack-helper.service
-systemctl --user enable --now homestack-agent.service
+curl -fsSL https://raw.githubusercontent.com/shusfun/HomeStack/v0.1.8/deploy/install.sh | \
+  sudo bash -s -- upgrade control --version v0.1.8 --reset-setup-token \
+  --update-public-key "$UPDATE_PUBLIC_KEY"
 ```
 
-逐项检查服务状态和日志，不要把启动失败替换成其他监听地址、公共 DERP 或 HTTP。完整验收见 [acceptance.md](acceptance.md)。
+完成标记存在后该参数会被永久拒绝。
+
+## 3. 域名与公网 IP 迁移
+
+不需要重新安装。在 Control 的“设置 -> 域名与网络”提交完整五项配置。提交前必须：
+
+1. 先在 DNS、宝塔和证书中配置新域名，并确认新域名已反代到当前 VPS。
+2. 使用 Pocket ID Passkey 重新认证当前 Owner；授权绑定当前浏览器会话，五分钟过期且单次使用。
+3. 输入新的 Control 域名作为确认文本。
+
+迁移期间 Maintenance Helper 会保留新旧 OIDC 回调，结构化更新 Headscale YAML，逐项重启并健康检查。成功后删除旧回调和临时 Pocket API Key，浏览器跳转到新 Control 域名重新登录；失败时恢复配置、回调和服务并返回原始错误及回滚错误。
+
+存在已登记设备时禁止修改 Tailnet 基础域名；Control、Pocket ID、Headscale 域名和 VPS 公网 IPv4可独立迁移。Owner 始终按稳定的 `provider + subject` 识别，不会重新认领。
+
+## 4. 设备端
+
+设备端继续使用 Release 安装器安装 Agent。以最终用户运行，不能对整个 Agent 安装器使用 sudo：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/shusfun/HomeStack/v0.1.8/deploy/install.sh | \
+  bash -s -- agent --version v0.1.8 --update-public-key "$UPDATE_PUBLIC_KEY"
+```
+
+Agent 只在设备 Tailnet IP 的 TCP `9443` 提供 HTTPS。FileBrowser、Jellyfin 和管理端口不得暴露到公网。完整验证项目见 [acceptance.md](acceptance.md)。

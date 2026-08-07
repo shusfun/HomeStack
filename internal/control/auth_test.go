@@ -115,3 +115,67 @@ func TestProviderMetadataUsesStableOrder(t *testing.T) {
 		t.Fatalf("登录方式顺序不稳定: %+v", metadata)
 	}
 }
+
+func TestMaintenanceReauthOnlyAllowsPocketAndUsesFreshLogin(t *testing.T) {
+	now := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
+	store, _ := OpenOwnerStore("")
+	store.now = func() time.Time { return now }
+	owner, err := store.AuthenticateOrClaim(ExternalIdentity{Provider: "pocket", Subject: "owner", Email: "owner@example.com", EmailVerified: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, _, err := store.CreateSession(owner.Subject, "browser", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewAuthManager([]*OAuthProvider{{ID: "pocket", Label: "Pocket ID", Kind: "oidc", OAuth: oauth2.Config{ClientID: "client", Endpoint: oauth2.Endpoint{AuthURL: "https://id.example.com/authorize"}}}}, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.now = func() time.Time { return now }
+	mux := http.NewServeMux()
+	manager.RegisterRoutes(mux)
+	request := httptest.NewRequest(http.MethodGet, "/auth/reauth/pocket?return=/settings/domains", nil)
+	request.AddCookie(&http.Cookie{Name: "homestack_control_session", Value: session})
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, request)
+	location, err := url.Parse(response.Header().Get("Location"))
+	if err != nil || response.Code != http.StatusFound || location.Query().Get("prompt") != "login" || location.Query().Get("max_age") != "0" {
+		t.Fatalf("Pocket 重新认证未强制新登录: %d %s err=%v", response.Code, response.Header().Get("Location"), err)
+	}
+	manager.mu.Lock()
+	pending := manager.pending[location.Query().Get("state")]
+	manager.mu.Unlock()
+	if pending.Mode != "maintenance" || pending.OwnerID != owner.Subject || pending.ReturnURL != "/settings/domains" {
+		t.Fatalf("重新认证授权未绑定 Owner 和回跳: %+v", pending)
+	}
+
+	rejected := httptest.NewRecorder()
+	bad := httptest.NewRequest(http.MethodGet, "/auth/reauth/github", nil)
+	bad.AddCookie(&http.Cookie{Name: "homestack_control_session", Value: session})
+	mux.ServeHTTP(rejected, bad)
+	if rejected.Code != http.StatusBadRequest {
+		t.Fatalf("非 Pocket 提供商可用于迁移重新认证: %d", rejected.Code)
+	}
+}
+
+func TestMaintenanceGrantIsSessionBoundSingleUseAndExpires(t *testing.T) {
+	store, _ := OpenOwnerStore("")
+	manager, _ := NewAuthManager([]*OAuthProvider{{ID: "pocket", Label: "Pocket ID"}}, store)
+	now := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
+	manager.now = func() time.Time { return now }
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/system/reconfigure", nil)
+	request.AddCookie(&http.Cookie{Name: "homestack_control_session", Value: "session-a"})
+	manager.maintenanceGrants[maintenanceGrantKey("owner", "session-a")] = now.Add(5 * time.Minute)
+	if !manager.ConsumeMaintenanceGrant(request, "owner") || manager.ConsumeMaintenanceGrant(request, "owner") {
+		t.Fatal("维护授权不是单次使用")
+	}
+	manager.maintenanceGrants[maintenanceGrantKey("owner", "session-a")] = now
+	if manager.ConsumeMaintenanceGrant(request, "owner") {
+		t.Fatal("过期维护授权仍可使用")
+	}
+	manager.maintenanceGrants[maintenanceGrantKey("owner", "session-b")] = now.Add(time.Minute)
+	if manager.ConsumeMaintenanceGrant(request, "owner") {
+		t.Fatal("其他浏览器会话的维护授权可被当前会话使用")
+	}
+}

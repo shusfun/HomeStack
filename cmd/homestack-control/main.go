@@ -9,16 +9,20 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/wangshangbin/homestack/internal/buildinfo"
 	"github.com/wangshangbin/homestack/internal/components"
 	"github.com/wangshangbin/homestack/internal/control"
 	"github.com/wangshangbin/homestack/internal/invite"
+	"github.com/wangshangbin/homestack/internal/maintenance"
+	setupapi "github.com/wangshangbin/homestack/internal/setup"
 	"github.com/wangshangbin/homestack/internal/web"
 )
 
@@ -31,6 +35,19 @@ func main() {
 		if err := keygen(os.Args[2:]); err != nil {
 			log.Fatal(err)
 		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "setup" {
+		if err := runSetup(os.Args[2:]); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "configtest" {
+		if err := configtest(os.Args[2:]); err != nil {
+			log.Fatal(err)
+		}
+		fmt.Println("HomeStack Control 配置有效")
 		return
 	}
 	if err := run(); err != nil {
@@ -83,51 +100,152 @@ func run() error {
 	server, err := control.NewServer(control.ServerOptions{
 		Authenticator: authenticator, Owners: owners, Invites: invites, Devices: devices, Headscale: headscale,
 		SigningKey: signingKey, SigningKeyID: settings.signingKeyID, PublicURL: settings.publicURL,
-		HeadscaleURL: settings.headscaleURL,
+		HeadscaleURL: settings.headscaleURL, Maintenance: maintenance.SocketClient{},
 	})
 	if err != nil {
 		return err
 	}
-	log.Printf("HomeStack Control 正在监听 %s", settings.address)
+	log.Printf("HomeStack Control 正在监听 %s (%s)", settings.address, settings.transport)
+	if settings.transport == "reverse-proxy" {
+		return control.ServeReverseProxy(ctx, settings.address, server.Handler(web.Handler()))
+	}
 	return control.ServeTLS(ctx, settings.address, settings.tlsCert, settings.tlsKey, server.Handler(web.Handler()))
 }
 
 type controlSettings struct {
-	address, publicURL, headscaleURL, stateDir, headscaleConfig, tlsCert, tlsKey string
-	signingKeyPath, signingKeyID                                                 string
-	pocketIssuer, pocketClientID, pocketClientSecret                             string
-	googleClientID, googleClientSecret                                           string
-	githubClientID, githubClientSecret                                           string
+	transport, address, publicURL, headscaleURL, stateDir, headscaleConfig, tlsCert, tlsKey string
+	signingKeyPath, signingKeyID                                                            string
+	pocketIssuer, pocketClientID, pocketClientSecret                                        string
+	googleClientID, googleClientSecret                                                      string
+	githubClientID, githubClientSecret                                                      string
 }
 
 func loadSettings() (controlSettings, error) {
 	values := map[string]string{
-		"HOMESTACK_CONTROL_ADDR":     os.Getenv("HOMESTACK_CONTROL_ADDR"),
-		"HOMESTACK_PUBLIC_URL":       os.Getenv("HOMESTACK_PUBLIC_URL"),
-		"HOMESTACK_HEADSCALE_URL":    os.Getenv("HOMESTACK_HEADSCALE_URL"),
-		"HOMESTACK_STATE_DIR":        os.Getenv("HOMESTACK_STATE_DIR"),
-		"HOMESTACK_HEADSCALE_CONFIG": os.Getenv("HOMESTACK_HEADSCALE_CONFIG"),
-		"HOMESTACK_TLS_CERT":         os.Getenv("HOMESTACK_TLS_CERT"),
-		"HOMESTACK_TLS_KEY":          os.Getenv("HOMESTACK_TLS_KEY"),
-		"HOMESTACK_SIGNING_KEY":      os.Getenv("HOMESTACK_SIGNING_KEY"),
-		"HOMESTACK_SIGNING_KEY_ID":   os.Getenv("HOMESTACK_SIGNING_KEY_ID"),
+		"HOMESTACK_CONTROL_TRANSPORT": os.Getenv("HOMESTACK_CONTROL_TRANSPORT"),
+		"HOMESTACK_CONTROL_ADDR":      os.Getenv("HOMESTACK_CONTROL_ADDR"),
+		"HOMESTACK_PUBLIC_URL":        os.Getenv("HOMESTACK_PUBLIC_URL"),
+		"HOMESTACK_HEADSCALE_URL":     os.Getenv("HOMESTACK_HEADSCALE_URL"),
+		"HOMESTACK_STATE_DIR":         os.Getenv("HOMESTACK_STATE_DIR"),
+		"HOMESTACK_HEADSCALE_CONFIG":  os.Getenv("HOMESTACK_HEADSCALE_CONFIG"),
+		"HOMESTACK_SIGNING_KEY":       os.Getenv("HOMESTACK_SIGNING_KEY"),
+		"HOMESTACK_SIGNING_KEY_ID":    os.Getenv("HOMESTACK_SIGNING_KEY_ID"),
 	}
 	for name, value := range values {
 		if strings.TrimSpace(value) == "" {
 			return controlSettings{}, fmt.Errorf("必须设置环境变量 %s", name)
 		}
 	}
+	transport := values["HOMESTACK_CONTROL_TRANSPORT"]
+	tlsCert, tlsKey := os.Getenv("HOMESTACK_TLS_CERT"), os.Getenv("HOMESTACK_TLS_KEY")
+	switch transport {
+	case "tls":
+		if strings.TrimSpace(tlsCert) == "" || strings.TrimSpace(tlsKey) == "" {
+			return controlSettings{}, errors.New("tls 模式必须同时设置 HOMESTACK_TLS_CERT 和 HOMESTACK_TLS_KEY")
+		}
+	case "reverse-proxy":
+		host, _, err := net.SplitHostPort(values["HOMESTACK_CONTROL_ADDR"])
+		if err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() {
+			return controlSettings{}, errors.New("reverse-proxy 模式必须绑定明确的回环 IP 和端口")
+		}
+		if strings.TrimSpace(tlsCert) != "" || strings.TrimSpace(tlsKey) != "" {
+			return controlSettings{}, errors.New("reverse-proxy 模式不允许配置后端 TLS 证书")
+		}
+	default:
+		return controlSettings{}, errors.New("HOMESTACK_CONTROL_TRANSPORT 必须明确设置为 tls 或 reverse-proxy")
+	}
 	return controlSettings{
-		address: values["HOMESTACK_CONTROL_ADDR"], publicURL: values["HOMESTACK_PUBLIC_URL"],
+		transport: transport, address: values["HOMESTACK_CONTROL_ADDR"], publicURL: values["HOMESTACK_PUBLIC_URL"],
 		headscaleURL: values["HOMESTACK_HEADSCALE_URL"],
 		stateDir:     values["HOMESTACK_STATE_DIR"], headscaleConfig: values["HOMESTACK_HEADSCALE_CONFIG"],
-		tlsCert: values["HOMESTACK_TLS_CERT"], tlsKey: values["HOMESTACK_TLS_KEY"],
+		tlsCert: tlsCert, tlsKey: tlsKey,
 		signingKeyPath: values["HOMESTACK_SIGNING_KEY"], signingKeyID: values["HOMESTACK_SIGNING_KEY_ID"],
 		pocketIssuer: os.Getenv("HOMESTACK_POCKET_ID_ISSUER"), pocketClientID: os.Getenv("HOMESTACK_POCKET_ID_CLIENT_ID"),
 		pocketClientSecret: os.Getenv("HOMESTACK_POCKET_ID_CLIENT_SECRET"), googleClientID: os.Getenv("HOMESTACK_GOOGLE_CLIENT_ID"),
 		googleClientSecret: os.Getenv("HOMESTACK_GOOGLE_CLIENT_SECRET"), githubClientID: os.Getenv("HOMESTACK_GITHUB_CLIENT_ID"),
 		githubClientSecret: os.Getenv("HOMESTACK_GITHUB_CLIENT_SECRET"),
 	}, nil
+}
+
+func runSetup(arguments []string) error {
+	flags := flag.NewFlagSet("setup", flag.ContinueOnError)
+	address := flags.String("addr", "127.0.0.1:8443", "Setup 回环监听地址")
+	tokenHash := flags.String("token-hash", "/etc/homestack/setup-token.sha256", "Setup 令牌 SHA-256 文件")
+	sessionPath := flags.String("session", "/etc/homestack/setup-session.json", "Setup 会话摘要文件")
+	socket := flags.String("socket", setupapi.DefaultSocketPath, "Setup Helper Unix Socket")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	host, _, err := net.SplitHostPort(*address)
+	if err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() {
+		return errors.New("Setup 必须绑定明确的回环 IP 和端口")
+	}
+	server, err := setupapi.NewServer(setupapi.ServerOptions{TokenHashPath: *tokenHash, SessionPath: *sessionPath, Helper: setupapi.SocketClient{Path: *socket}})
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	log.Printf("HomeStack Setup 正在监听 %s", *address)
+	return control.ServeReverseProxy(ctx, *address, server.Handler(web.Handler()))
+}
+
+func configtest(arguments []string) error {
+	flags := flag.NewFlagSet("configtest", flag.ContinueOnError)
+	envFile := flags.String("env-file", "", "Control 环境文件")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if *envFile == "" {
+		return errors.New("configtest 必须指定 --env-file")
+	}
+	if err := loadEnvFile(*envFile); err != nil {
+		return err
+	}
+	settings, err := loadSettings()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	headscaleSpec, err := components.FindSpec("headscale")
+	if err != nil {
+		return err
+	}
+	if err := components.RequireVersion(ctx, headscaleSpec); err != nil {
+		return err
+	}
+	if _, err := createProviders(ctx, settings); err != nil {
+		return err
+	}
+	if _, err := control.NewHeadscaleCLI(settings.headscaleConfig); err != nil {
+		return err
+	}
+	if _, err := loadPrivateKey(settings.signingKeyPath); err != nil {
+		return err
+	}
+	return nil
+}
+
+func loadEnvFile(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("读取 Control 环境文件失败: %w", err)
+	}
+	for index, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		name, value, found := strings.Cut(trimmed, "=")
+		if !found || name == "" || strings.ContainsAny(name, " \t") {
+			return fmt.Errorf("Control 环境文件第 %d 行格式无效", index+1)
+		}
+		if err := os.Setenv(name, value); err != nil {
+			return fmt.Errorf("设置 Control 环境变量 %s 失败: %w", name, err)
+		}
+	}
+	return nil
 }
 
 func createProviders(ctx context.Context, settings controlSettings) ([]*control.OAuthProvider, error) {

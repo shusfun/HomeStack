@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/wangshangbin/homestack/internal/invite"
+	"github.com/wangshangbin/homestack/internal/maintenance"
 )
 
 type testAuthenticator struct {
@@ -33,6 +34,79 @@ type testHeadscale struct{}
 
 func (testHeadscale) CreateSingleUseKey(context.Context, string) (string, error) {
 	return "single-use-key", nil
+}
+
+type maintenanceTestAuthenticator struct {
+	testAuthenticator
+	grant bool
+}
+
+func (a *maintenanceTestAuthenticator) ConsumeMaintenanceGrant(*http.Request, string) bool {
+	granted := a.grant
+	a.grant = false
+	return granted
+}
+
+type testMaintenance struct {
+	config maintenance.Configuration
+	status maintenance.Status
+	called int
+}
+
+func (m *testMaintenance) Configuration(context.Context) (maintenance.Configuration, error) {
+	return m.config, nil
+}
+
+func (m *testMaintenance) Status(context.Context) (maintenance.Status, error) { return m.status, nil }
+
+func (m *testMaintenance) Reconfigure(_ context.Context, config maintenance.Configuration) (maintenance.Status, error) {
+	m.called++
+	m.config = config
+	return maintenance.Status{Phase: maintenance.PhasePreflight, Target: &config}, nil
+}
+
+func TestCompletedControlPermanentlyLocksSetupAPI(t *testing.T) {
+	server, _ := newTestControlServer(t, time.Now().UTC(), nil)
+	for _, target := range []struct{ method, path string }{{http.MethodGet, "/api/v1/setup/status"}, {http.MethodPost, "/api/v1/setup/session"}, {http.MethodPost, "/api/v1/setup/prepare"}, {http.MethodPost, "/api/v1/setup/finalize"}} {
+		response := httptest.NewRecorder()
+		server.Handler(nil).ServeHTTP(response, httptest.NewRequest(target.method, target.path, nil))
+		if response.Code != http.StatusLocked || !strings.Contains(response.Body.String(), "setup_locked") {
+			t.Fatalf("正式 Control 未锁定 %s %s: %d %s", target.method, target.path, response.Code, response.Body.String())
+		}
+	}
+}
+
+func TestReconfigureRequiresBrowserOriginReauthAndConfirmation(t *testing.T) {
+	server, owner := newTestControlServer(t, time.Now().UTC(), nil)
+	auth := &maintenanceTestAuthenticator{testAuthenticator: testAuthenticator{identity: owner}, grant: true}
+	helper := &testMaintenance{}
+	server.authenticator = auth
+	server.maintenance = helper
+	body := `{"control_host":"new.example.com","pocket_host":"id.example.com","mesh_host":"mesh.example.com","tail_host":"tail.example.com","public_ipv4":"203.0.113.8","confirmation":"new.example.com"}`
+
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/system/reconfigure", strings.NewReader(body))
+	request.Header.Set("Origin", "https://control.example.com")
+	response := httptest.NewRecorder()
+	server.Handler(nil).ServeHTTP(response, request)
+	if response.Code != http.StatusAccepted || helper.called != 1 {
+		t.Fatalf("合法域名迁移未被接受: %d %s called=%d", response.Code, response.Body.String(), helper.called)
+	}
+
+	response = httptest.NewRecorder()
+	server.Handler(nil).ServeHTTP(response, request.Clone(context.Background()))
+	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), "reauthentication_required") {
+		t.Fatalf("迁移重新认证授权可重复使用: %d %s", response.Code, response.Body.String())
+	}
+
+	auth.grant = true
+	bearer := httptest.NewRequest(http.MethodPost, "/api/v1/system/reconfigure", strings.NewReader(body))
+	bearer.Header.Set("Origin", "https://control.example.com")
+	bearer.Header.Set("Authorization", "Bearer app-token")
+	response = httptest.NewRecorder()
+	server.Handler(nil).ServeHTTP(response, bearer)
+	if response.Code != http.StatusForbidden || helper.called != 1 {
+		t.Fatalf("Bearer 请求绕过浏览器限制: %d %s", response.Code, response.Body.String())
+	}
 }
 
 func TestCreateTicketRequiresOriginAndUsesFixedAgentURL(t *testing.T) {

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -17,8 +18,10 @@ import (
 
 	"github.com/wangshangbin/homestack/internal/agent"
 	"github.com/wangshangbin/homestack/internal/invite"
+	"github.com/wangshangbin/homestack/internal/maintenance"
 	"github.com/wangshangbin/homestack/internal/protocol"
 	"github.com/wangshangbin/homestack/internal/secure"
+	setupapi "github.com/wangshangbin/homestack/internal/setup"
 )
 
 type ServerOptions struct {
@@ -27,6 +30,7 @@ type ServerOptions struct {
 	Invites       *invite.Store
 	Devices       *DeviceStore
 	Headscale     Headscale
+	Maintenance   maintenance.Helper
 	SigningKey    ed25519.PrivateKey
 	SigningKeyID  string
 	PublicURL     string
@@ -41,6 +45,7 @@ type Server struct {
 	invites       *invite.Store
 	devices       *DeviceStore
 	headscale     Headscale
+	maintenance   maintenance.Helper
 	signingKey    ed25519.PrivateKey
 	signingKeyID  string
 	publicURL     string
@@ -82,17 +87,24 @@ func NewServer(options ServerOptions) (*Server, error) {
 	return &Server{
 		authenticator: options.Authenticator, owners: options.Owners, invites: options.Invites, devices: options.Devices, headscale: options.Headscale,
 		signingKey: options.SigningKey, signingKeyID: options.SigningKeyID, publicURL: options.PublicURL,
-		headscaleURL: options.HeadscaleURL, now: options.Now, random: options.Random,
+		headscaleURL: options.HeadscaleURL, maintenance: options.Maintenance, now: options.Now, random: options.Random,
 	}, nil
 }
 
 func (s *Server) Handler(static http.Handler) http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/setup/status", setupLocked)
+	mux.HandleFunc("POST /api/v1/setup/session", setupLocked)
+	mux.HandleFunc("POST /api/v1/setup/prepare", setupLocked)
+	mux.HandleFunc("POST /api/v1/setup/finalize", setupLocked)
 	mux.HandleFunc("GET /api/v1/health", s.health)
 	if webAuth, ok := s.authenticator.(WebAuthenticator); ok {
 		webAuth.RegisterRoutes(mux)
 	}
 	mux.HandleFunc("GET /api/v1/meta", s.meta)
+	mux.HandleFunc("GET /api/v1/system/config", s.systemConfiguration)
+	mux.HandleFunc("GET /api/v1/system/reconfigure/status", s.reconfigureStatus)
+	mux.HandleFunc("POST /api/v1/system/reconfigure", s.reconfigure)
 	mux.HandleFunc("GET /api/v1/me", s.me)
 	mux.HandleFunc("POST /api/v1/device-enrollments", s.createEnrollment)
 	mux.HandleFunc("POST /api/v1/tailnet/auth-keys", s.createTailnetAuthKey)
@@ -106,6 +118,89 @@ func (s *Server) Handler(static http.Handler) http.Handler {
 		mux.Handle("/", static)
 	}
 	return securityHeaders(mux)
+}
+
+func setupLocked(writer http.ResponseWriter, _ *http.Request) {
+	writeControlError(writer, http.StatusLocked, "setup_locked", "Setup 已完成并永久锁定")
+}
+
+func (s *Server) systemConfiguration(writer http.ResponseWriter, request *http.Request) {
+	if _, ok := s.requireIdentity(writer, request); !ok {
+		return
+	}
+	if s.maintenance == nil {
+		writeControlError(writer, http.StatusServiceUnavailable, "maintenance_unavailable", "维护 Helper 未配置")
+		return
+	}
+	config, err := s.maintenance.Configuration(request.Context())
+	if err != nil {
+		writeControlError(writer, http.StatusBadGateway, "maintenance_failed", err.Error())
+		return
+	}
+	writeJSON(writer, http.StatusOK, config)
+}
+
+func (s *Server) reconfigureStatus(writer http.ResponseWriter, request *http.Request) {
+	if _, ok := s.requireIdentity(writer, request); !ok {
+		return
+	}
+	if s.maintenance == nil {
+		writeControlError(writer, http.StatusServiceUnavailable, "maintenance_unavailable", "维护 Helper 未配置")
+		return
+	}
+	status, err := s.maintenance.Status(request.Context())
+	if err != nil {
+		writeControlError(writer, http.StatusBadGateway, "maintenance_failed", err.Error())
+		return
+	}
+	writeJSON(writer, http.StatusOK, status)
+}
+
+func (s *Server) reconfigure(writer http.ResponseWriter, request *http.Request) {
+	identity, ok := s.requireIdentity(writer, request)
+	if !ok {
+		return
+	}
+	if request.Header.Get("Authorization") != "" || !s.validWriteOrigin(request) {
+		writeControlError(writer, http.StatusForbidden, "origin_rejected", "域名迁移只接受当前 Control 浏览器会话")
+		return
+	}
+	authorizer, ok := s.authenticator.(MaintenanceAuthorizer)
+	if !ok || !authorizer.ConsumeMaintenanceGrant(request, identity.Subject) {
+		writeControlError(writer, http.StatusForbidden, "reauthentication_required", "域名迁移需要重新使用 Pocket ID Passkey 认证")
+		return
+	}
+	var body struct {
+		maintenance.Configuration
+		Confirmation string `json:"confirmation"`
+	}
+	if err := decodeJSONBody(writer, request, &body); err != nil {
+		writeControlError(writer, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	body.ControlHost = strings.ToLower(strings.TrimSpace(body.ControlHost))
+	body.PocketHost = strings.ToLower(strings.TrimSpace(body.PocketHost))
+	body.MeshHost = strings.ToLower(strings.TrimSpace(body.MeshHost))
+	body.TailHost = strings.ToLower(strings.TrimSpace(body.TailHost))
+	body.PublicIPv4 = strings.TrimSpace(body.PublicIPv4)
+	if err := setupapi.ValidateConfiguration(body.Configuration); err != nil {
+		writeControlError(writer, http.StatusBadRequest, "invalid_configuration", err.Error())
+		return
+	}
+	if strings.TrimSpace(body.Confirmation) != body.ControlHost {
+		writeControlError(writer, http.StatusBadRequest, "confirmation_mismatch", "确认文本必须与新的 Control 域名完全一致")
+		return
+	}
+	if s.maintenance == nil {
+		writeControlError(writer, http.StatusServiceUnavailable, "maintenance_unavailable", "维护 Helper 未配置")
+		return
+	}
+	status, err := s.maintenance.Reconfigure(request.Context(), body.Configuration)
+	if err != nil {
+		writeControlError(writer, http.StatusBadGateway, "reconfigure_failed", err.Error())
+		return
+	}
+	writeJSON(writer, http.StatusAccepted, status)
 }
 
 func (s *Server) health(writer http.ResponseWriter, _ *http.Request) {
@@ -581,14 +676,31 @@ func securityHeaders(next http.Handler) http.Handler {
 }
 
 func ServeTLS(ctx context.Context, address, certFile, keyFile string, handler http.Handler) error {
-	server := &http.Server{Addr: address, Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
+	return serve(ctx, &http.Server{Addr: address, Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}, certFile, keyFile)
+}
+
+func ServeReverseProxy(ctx context.Context, address string, handler http.Handler) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() {
+		return errors.New("reverse-proxy 模式必须绑定明确的回环 IP 和端口")
+	}
+	return serve(ctx, &http.Server{Addr: address, Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}, "", "")
+}
+
+func serve(ctx context.Context, server *http.Server, certFile, keyFile string) error {
 	go func() {
 		<-ctx.Done()
 		shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_ = server.Shutdown(shutdownContext)
 	}()
-	if err := server.ListenAndServeTLS(certFile, keyFile); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	var err error
+	if certFile != "" || keyFile != "" {
+		err = server.ListenAndServeTLS(certFile, keyFile)
+	} else {
+		err = server.ListenAndServe()
+	}
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 	return nil

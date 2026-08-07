@@ -1,4 +1,4 @@
-export type Surface = "desktop" | "control" | "agent";
+export type Surface = "desktop" | "control" | "agent" | "setup";
 
 export interface APIErrorResponse {
   error?: {

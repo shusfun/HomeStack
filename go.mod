@@ -9,6 +9,7 @@ require (
 	github.com/pelletier/go-toml/v2 v2.2.4
 	github.com/wailsapp/wails/v3 v3.0.0-beta.4
 	github.com/zalando/go-keyring v0.2.6
+	go.yaml.in/yaml/v3 v3.0.4
 	golang.org/x/oauth2 v0.30.0
 )
 
@@ -134,7 +135,6 @@ require (
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	github.com/zeebo/xxh3 v1.1.0 // indirect
 	gitlab.com/digitalxero/go-conventional-commit v1.0.7 // indirect
-	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/crypto v0.51.0 // indirect
 	golang.org/x/exp/typeparams v0.0.0-20260112195511-716be5621a96 // indirect
 	golang.org/x/image v0.41.0 // indirect

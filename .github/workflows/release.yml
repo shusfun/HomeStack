@@ -348,7 +348,7 @@ jobs:
           Linux Control 一键安装：
 
           \`\`\`bash
-          curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/deploy/install.sh | sudo bash -s -- control --version "$RELEASE_TAG" --update-public-key "$UPDATE_PUBLIC_KEY"
+          curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/$RELEASE_TAG/deploy/install.sh | sudo bash -s -- control --version "$RELEASE_TAG" --update-public-key "$UPDATE_PUBLIC_KEY"
           \`\`\`
 
           安装脚本会在写入系统前计算资产 SHA256，并使用所提供公钥验证 Ed25519 签名。
@@ -356,7 +356,7 @@ jobs:
           Linux Agent 一键安装：
 
           \`\`\`bash
-          curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/deploy/install.sh | bash -s -- agent --version "$RELEASE_TAG" --update-public-key "$UPDATE_PUBLIC_KEY"
+          curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/$RELEASE_TAG/deploy/install.sh | bash -s -- agent --version "$RELEASE_TAG" --update-public-key "$UPDATE_PUBLIC_KEY"
           \`\`\`
 
           安装脚本会在写入系统前计算资产 SHA256，并使用所提供公钥验证 Ed25519 签名。

@@ -93,6 +93,9 @@ package_cli() {
   if [[ "$component" == "agent" ]]; then
     go build -trimpath -buildvcs=false -ldflags "$ldflags" -o "$install_root/homestack-helper" ./cmd/homestack-helper
   fi
+  if [[ "$component" == "control" ]]; then
+    go build -trimpath -buildvcs=false -ldflags "$ldflags" -o "$install_root/homestack-setup-helper" ./cmd/homestack-setup-helper
+  fi
   cp README.md "$install_root/"
   cp -R docs deploy "$install_root/"
   tar -C "$install_root" -czf "$output_dir/homestack-${component}_${version}_linux_${target_arch}.tar.gz" .

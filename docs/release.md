@@ -25,8 +25,8 @@ GitHub Actions 只发布已存在且符合 `vX.Y.Z` 的标签。测试通过后�
 ## 创建发布
 
 ```bash
-git tag -a v0.1.3 -m "HomeStack v0.1.3"
-git push origin v0.1.3
+git tag -a v0.1.8 -m "HomeStack v0.1.8"
+git push origin v0.1.8
 ```
 
 工作流不创建标签、不覆盖 Release，也不发布部分矩阵产物。六个平台桌面包和两个 Linux CLI 架构必须全部成功。
@@ -36,7 +36,7 @@ git push origin v0.1.3
 ```bash
 export HOMESTACK_UPDATE_PUBLIC_KEY='REPLACE_WITH_BASE64_ED25519_PUBLIC_KEY'
 GOENV=./go.env go tool wails3 task release:package \
-  COMPONENT=desktop VERSION=v0.1.3 GOOS=darwin ARCH=arm64
+  COMPONENT=desktop VERSION=v0.1.8 GOOS=darwin ARCH=arm64
 ```
 
 Control 与 Agent 只允许 Linux；桌面必须在目标操作系统和目标架构的原生环境构建。发布前运行：
@@ -51,4 +51,4 @@ node ~/.codex/skills/guard-repo-foundations/scripts/audit-repo-foundations.mjs -
 
 安装器要求 `--update-public-key` 或 `HOMESTACK_UPDATE_PUBLIC_KEY`，同时验证资产 `.sig` 和 SHA-256。已有配置不会覆盖；升级运行中服务会先停止，替换成功后再启动。
 
-安装器不会自动申请 DNS/TLS、安装第三方组件、降低 HTTPS、启用公共 DERP/出口节点，也不会在加密凭据不可用时写明文密钥。
+安装器不会自动申请 DNS/TLS、降低 HTTPS、启用公共 DERP/出口节点，也不会在加密凭据不可用时写明文密钥。首次 Control Setup 只允许从固定官方 Release 安装并校验 Headscale `0.29.3` 与 Pocket ID `2.12.0`；Tailscale、FileBrowser、Jellyfin 和 cc-connect 仍由用户管理。

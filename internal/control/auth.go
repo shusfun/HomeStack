@@ -48,6 +48,10 @@ type Authenticator interface {
 	Metadata() []ProviderMetadata
 }
 
+type MaintenanceAuthorizer interface {
+	ConsumeMaintenanceGrant(*http.Request, string) bool
+}
+
 type WebAuthenticator interface {
 	RegisterRoutes(*http.ServeMux)
 }
@@ -105,19 +109,20 @@ type appCode struct {
 }
 
 type AuthManager struct {
-	providers map[string]*OAuthProvider
-	store     *OwnerStore
-	mu        sync.Mutex
-	pending   map[string]pendingLogin
-	appCodes  map[string]appCode
-	now       func() time.Time
+	providers         map[string]*OAuthProvider
+	store             *OwnerStore
+	mu                sync.Mutex
+	pending           map[string]pendingLogin
+	appCodes          map[string]appCode
+	maintenanceGrants map[string]time.Time
+	now               func() time.Time
 }
 
 func NewAuthManager(providers []*OAuthProvider, store *OwnerStore) (*AuthManager, error) {
 	if len(providers) == 0 || store == nil {
 		return nil, errors.New("认证提供商和所有者存储必须配置")
 	}
-	manager := &AuthManager{providers: map[string]*OAuthProvider{}, store: store, pending: map[string]pendingLogin{}, appCodes: map[string]appCode{}, now: time.Now}
+	manager := &AuthManager{providers: map[string]*OAuthProvider{}, store: store, pending: map[string]pendingLogin{}, appCodes: map[string]appCode{}, maintenanceGrants: map[string]time.Time{}, now: time.Now}
 	for _, provider := range providers {
 		if provider == nil || provider.ID == "" || manager.providers[provider.ID] != nil {
 			return nil, errors.New("认证提供商 ID 无效或重复")
@@ -157,10 +162,28 @@ func (a *AuthManager) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /auth/login/{provider}", a.startWebLogin)
 	mux.HandleFunc("GET /auth/app/start/{provider}", a.startAppLogin)
 	mux.HandleFunc("GET /auth/link/{provider}", a.startLink)
+	mux.HandleFunc("GET /auth/reauth/{provider}", a.startMaintenanceReauth)
 	mux.HandleFunc("GET /auth/callback/{provider}", a.completeLogin)
 	mux.HandleFunc("POST /api/v1/auth/app/token", a.exchangeAppCode)
 	mux.HandleFunc("POST /api/v1/auth/app/refresh", a.refreshAppToken)
 	mux.HandleFunc("POST /auth/logout", a.logout)
+}
+
+func (a *AuthManager) startMaintenanceReauth(writer http.ResponseWriter, request *http.Request) {
+	if request.PathValue("provider") != "pocket" {
+		http.Error(writer, "域名迁移只允许使用 Pocket ID 重新认证", http.StatusBadRequest)
+		return
+	}
+	identity, err := a.Authenticate(request.Context(), request)
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusUnauthorized)
+		return
+	}
+	returnURL := request.URL.Query().Get("return")
+	if returnURL != "/settings/domains" {
+		returnURL = "/settings/domains"
+	}
+	a.start(writer, request, pendingLogin{Mode: "maintenance", ReturnURL: returnURL, OwnerID: identity.Subject})
 }
 
 func (a *AuthManager) startWebLogin(writer http.ResponseWriter, request *http.Request) {
@@ -225,6 +248,9 @@ func (a *AuthManager) start(writer http.ResponseWriter, request *http.Request, p
 		oauth2.SetAuthURLParam("code_challenge", base64.RawURLEncoding.EncodeToString(digest[:])),
 		oauth2.SetAuthURLParam("code_challenge_method", "S256"),
 	}
+	if pending.Mode == "maintenance" {
+		options = append(options, oauth2.SetAuthURLParam("prompt", "login"), oauth2.SetAuthURLParam("max_age", "0"))
+	}
 	if provider.Kind == "oidc" {
 		options = append(options, oidc.Nonce(nonce))
 	}
@@ -256,6 +282,24 @@ func (a *AuthManager) completeLogin(writer http.ResponseWriter, request *http.Re
 		http.Error(writer, err.Error(), http.StatusUnauthorized)
 		return
 	}
+	if pending.Mode == "maintenance" {
+		owner, ok := a.store.Owner()
+		key := IdentityKey{Provider: external.Provider, Subject: external.Subject}
+		if !ok || owner.ID != pending.OwnerID || !containsIdentity(owner.Identities, key) || external.Provider != "pocket" {
+			http.Error(writer, "重新认证身份不是当前 HomeStack Owner", http.StatusForbidden)
+			return
+		}
+		cookie, err := request.Cookie("homestack_control_session")
+		if err != nil {
+			http.Error(writer, "重新认证缺少当前浏览器会话", http.StatusUnauthorized)
+			return
+		}
+		a.mu.Lock()
+		a.maintenanceGrants[maintenanceGrantKey(owner.ID, cookie.Value)] = a.now().UTC().Add(5 * time.Minute)
+		a.mu.Unlock()
+		http.Redirect(writer, request, pending.ReturnURL+"?reauthenticated=1", http.StatusSeeOther)
+		return
+	}
 	if pending.Mode == "link" {
 		if err := a.store.Link(pending.OwnerID, external); err != nil {
 			http.Error(writer, err.Error(), http.StatusForbidden)
@@ -280,6 +324,23 @@ func (a *AuthManager) completeLogin(writer http.ResponseWriter, request *http.Re
 	}
 	http.SetCookie(writer, &http.Cookie{Name: "homestack_control_session", Value: raw, Path: "/", Expires: expiresAt, Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode})
 	http.Redirect(writer, request, pending.ReturnURL, http.StatusSeeOther)
+}
+
+func (a *AuthManager) ConsumeMaintenanceGrant(request *http.Request, ownerID string) bool {
+	cookie, err := request.Cookie("homestack_control_session")
+	if err != nil {
+		return false
+	}
+	key := maintenanceGrantKey(ownerID, cookie.Value)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	expiresAt, ok := a.maintenanceGrants[key]
+	delete(a.maintenanceGrants, key)
+	return ok && a.now().UTC().Before(expiresAt)
+}
+
+func maintenanceGrantKey(ownerID, session string) string {
+	return ownerID + "\x00" + hashAuthToken(session)
 }
 
 func (a *AuthManager) completeAppLogin(writer http.ResponseWriter, request *http.Request, pending pendingLogin, identity Identity) {
@@ -477,6 +538,11 @@ func (a *AuthManager) pruneLocked() {
 	for key, value := range a.appCodes {
 		if !now.Before(value.ExpiresAt) {
 			delete(a.appCodes, key)
+		}
+	}
+	for key, expiresAt := range a.maintenanceGrants {
+		if !now.Before(expiresAt) {
+			delete(a.maintenanceGrants, key)
 		}
 	}
 }

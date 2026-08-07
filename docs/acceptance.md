@@ -13,11 +13,14 @@ bash -n scripts/package-release.sh
 
 必须覆盖：三类身份提供商配置，state/nonce/PKCE，首个所有者、显式绑定和同邮箱不合并；App code 单次兑换和会话过期；十分钟配对码重放；三十秒票据、错误所有者、固定跳转和 Origin；Agent API `401`、Helper 白名单、日志边界、资源指标、媒体 Range/进度；更新签名篡改、非法归档及错误版本/平台/架构。
 
+Setup 与迁移必须覆盖：一次性令牌消费和重启恢复、24 小时会话、限流、CSRF/Origin、完成后 `423 setup_locked`；Helper peer UID、固定下载摘要、原子写入权限和失败回滚；Pocket 用户组、两个 OIDC 客户端和临时 API Key 清理；域名迁移重新认证、单任务锁、新旧回调、Tailnet 设备限制及中断任务恢复。
+
 ## 网络
 
 - 不同 NAT 下 `tailscale ping` 优先显示直连；无法打洞时只出现 `homestack` 自有 DERP。
 - `tailscale debug derp-map` 不含公共 DERP。
 - Agent 只在 Tailnet IP 的 TCP `9443` 监听；VPS 不监听或转发文件、媒体、日志端口。
+- VPS 的 Control、Pocket ID、Headscale 仅监听 `127.0.0.1:8443`、`127.0.0.1:8444`、`127.0.0.1:18080`，gRPC 仅监听 `127.0.0.1:50443`；公网只开放 TCP `80/443` 和 UDP `3478`。
 - 打开设备后浏览器地址栏停留在 Agent Tailnet HTTPS 域名，下载或播放期间 Control 流量不增长。
 - 非本人设备和其他端口由 Headscale policy 拒绝。
 

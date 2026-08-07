@@ -16,6 +16,7 @@ cmd/homestack-desktop  极简 Wails 设备连接器
 cmd/homestack-agent    Linux 设备 BFF 与事务更新器
 cmd/homestack-control  公网身份与控制服务
 cmd/homestack-helper   Linux 最小特权 systemd helper
+cmd/homestack-setup-helper  一次性 Setup 与受限维护 helper
 internal/              协议、安全、认证与领域代码
 frontend/              desktop/control/agent 三个独立界面入口
 deploy/                systemd、Headscale 和组件配置样例
@@ -47,7 +48,9 @@ curl -fsSL https://raw.githubusercontent.com/shusfun/HomeStack/main/deploy/insta
   | bash -s -- agent --update-public-key "$UPDATE_PUBLIC_KEY"
 ```
 
-Control 以 root 安装；Agent 脚本必须以最终普通用户运行，并仅在安装固定 root helper、启用 linger 和设置 Tailscale operator 时调用 `sudo`。脚本不会安装或升级 Headscale、Pocket ID、Tailscale、FileBrowser、Jellyfin 或 cc-connect。
+Control 以 root 安装。首次安装会启动 `127.0.0.1:8443` Setup 并输出一次性令牌；Setup Helper 从官方 Release 固定下载并校验 Headscale `0.29.3` 与 Pocket ID `2.12.0`，完成后永久关闭安装能力。宝塔分别反代 Control `127.0.0.1:8443`、Pocket ID `127.0.0.1:8444` 和 Headscale `127.0.0.1:18080`。
+
+Agent 脚本必须以最终普通用户运行，并仅在安装固定 root helper、启用 linger 和设置 Tailscale operator 时调用 `sudo`。安装器不会安装或升级 Tailscale、FileBrowser、Jellyfin 或 cc-connect。
 
 ## 连接流程
 
