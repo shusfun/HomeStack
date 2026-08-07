@@ -18,16 +18,30 @@ const (
 )
 
 type Configuration struct {
+	PublicHost string                         `json:"public_host"`
+	Providers  map[string]ProviderCredentials `json:"providers"`
+}
+
+type ProviderCredentials struct {
+	ClientID     string `json:"client_id"`
+	ClientSecret string `json:"client_secret"`
+}
+
+type PrepareRequest struct {
 	PublicHost   string `json:"public_host"`
 	Provider     string `json:"provider"`
 	ClientID     string `json:"client_id"`
 	ClientSecret string `json:"client_secret"`
 }
 
+type PublicProviderConfiguration struct {
+	ID       string `json:"id"`
+	ClientID string `json:"client_id"`
+}
+
 type PublicConfiguration struct {
-	PublicHost string `json:"public_host"`
-	Provider   string `json:"provider"`
-	ClientID   string `json:"client_id"`
+	PublicHost string                        `json:"public_host"`
+	Providers  []PublicProviderConfiguration `json:"providers"`
 }
 
 type Status struct {
@@ -39,8 +53,11 @@ type Status struct {
 }
 
 type HelperRequest struct {
-	Operation string         `json:"operation"`
-	Config    *Configuration `json:"config,omitempty"`
+	Operation   string               `json:"operation"`
+	Config      *Configuration       `json:"config,omitempty"`
+	PublicHost  string               `json:"public_host,omitempty"`
+	Provider    string               `json:"provider,omitempty"`
+	Credentials *ProviderCredentials `json:"credentials,omitempty"`
 }
 
 type HelperResponse struct {

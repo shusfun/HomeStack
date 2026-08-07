@@ -239,13 +239,13 @@ func (s *Server) prepare(writer http.ResponseWriter, request *http.Request) {
 	if !s.authorizeWrite(writer, request) {
 		return
 	}
-	var config Configuration
-	if err := decodeJSON(writer, request, &config); err != nil {
+	var body PrepareRequest
+	if err := decodeJSON(writer, request, &body); err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	config = normalizeConfiguration(config)
-	if err := ValidateConfiguration(config); err != nil {
+	config, err := NormalizePrepareRequest(body)
+	if err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_configuration", err.Error())
 		return
 	}
@@ -337,14 +337,6 @@ func validateDNS(ctx context.Context, config Configuration) error {
 		}
 	}
 	return fmt.Errorf("域名 %s 未解析到公网地址", config.PublicHost)
-}
-
-func normalizeConfiguration(config Configuration) Configuration {
-	config.PublicHost = strings.ToLower(strings.TrimSpace(config.PublicHost))
-	config.Provider = strings.ToLower(strings.TrimSpace(config.Provider))
-	config.ClientID = strings.TrimSpace(config.ClientID)
-	config.ClientSecret = strings.TrimSpace(config.ClientSecret)
-	return config
 }
 
 func clientAddress(request *http.Request) string {

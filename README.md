@@ -23,6 +23,6 @@ go test -p=2 -parallel=2 ./...
 
 ## 部署
 
-Control 必须通过 GitHub Release 的签名安装器安装。首次启动会监听 `127.0.0.1:18443` 并输出一次性 Setup 令牌；Setup 只填写 VPS 域名、选择 Google 或 GitHub，再填写对应 OAuth Client ID/Secret。
+Control 必须通过 GitHub Release 的签名安装器安装。首次启动会监听 `127.0.0.1:18443` 并输出一次性 Setup 令牌；Setup 会从浏览器 HTTPS 地址识别 VPS 域名，选择 Google 或 GitHub 并填写一套 OAuth 凭据即可完成，登录后可继续绑定第二种登录方式。
 
 完整说明见 [docs/deployment.md](docs/deployment.md)、[docs/security.md](docs/security.md) 和 [docs/release.md](docs/release.md)。

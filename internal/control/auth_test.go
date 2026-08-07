@@ -12,18 +12,25 @@ import (
 	"golang.org/x/oauth2"
 )
 
-func TestAuthManagerExposesOnlyConfiguredProvider(t *testing.T) {
+func TestAuthManagerExposesConfiguredProvidersUntilOwnerClaim(t *testing.T) {
 	store, err := OpenOwnerStore("")
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager, err := NewAuthManager([]*OAuthProvider{{ID: "github", Label: "GitHub"}}, store)
+	manager, err := NewAuthManager([]*OAuthProvider{{ID: "google", Label: "Google"}, {ID: "github", Label: "GitHub"}}, store)
 	if err != nil {
 		t.Fatal(err)
 	}
 	metadata := manager.Metadata()
+	if len(metadata) != 2 || metadata[0].ID != "google" || metadata[1].ID != "github" {
+		t.Fatalf("未认领时登录方式错误: %+v", metadata)
+	}
+	if _, err := store.AuthenticateOrClaim(ExternalIdentity{Provider: "github", Subject: "owner", Email: "owner@example.com", EmailVerified: true}); err != nil {
+		t.Fatal(err)
+	}
+	metadata = manager.Metadata()
 	if len(metadata) != 1 || metadata[0].ID != "github" {
-		t.Fatalf("登录方式不唯一: %+v", metadata)
+		t.Fatalf("认领后暴露未绑定登录方式: %+v", metadata)
 	}
 }
 

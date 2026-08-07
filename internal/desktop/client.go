@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/wangshangbin/homestack/internal/protocol"
+	"github.com/wangshangbin/homestack/internal/publicurl"
 	"github.com/wangshangbin/homestack/internal/secure"
 	"github.com/wangshangbin/homestack/internal/securestore"
 	"github.com/wangshangbin/homestack/internal/tailscale"
@@ -338,12 +339,11 @@ func callbackHandler(expectedState string, codes chan<- string, failures chan<- 
 }
 
 func validateControlURL(raw string) (string, error) {
-	parsed, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") {
-		return "", errors.New("Control 地址必须是无凭据、无路径的有效 HTTPS 地址")
+	address, err := publicurl.Normalize(raw)
+	if err != nil {
+		return "", fmt.Errorf("Control 地址无效: %w", err)
 	}
-	parsed.Path = ""
-	return strings.TrimRight(parsed.String(), "/"), nil
+	return address.URL, nil
 }
 
 func responseError(action string, response *http.Response) error {

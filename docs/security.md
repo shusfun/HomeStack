@@ -1,7 +1,7 @@
 # 安全模型
 
 - VPS 只监听回环 Control 端口，公网 TLS 由宝塔处理。
-- 登录方式只能配置 Google 或 GitHub 中一个；Owner 身份固定使用 `provider + subject`，不按邮箱合并。
+- Setup 至少配置 Google 或 GitHub 中一个；Owner 可在重新认证后绑定第二种，身份固定使用 `provider + subject`，不按邮箱合并。
 - Setup 令牌和设备激活码均为 256 位随机值，服务端只持久化 SHA-256 摘要，并在首次成功兑换时消费。
 - App 会话和 Node 机器凭据分开签发、分开保存。桌面密钥进入系统 keyring，Linux headless 进入 `systemd-creds`，没有明文降级。
 - Node 只读取已登录的 Tailscale 状态，从 MagicDNS 推导唯一 HTTPS 地址；从不执行 `tailscale up`。

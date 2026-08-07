@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,6 +19,7 @@ import (
 	"time"
 
 	"github.com/wangshangbin/homestack/internal/protocol"
+	"github.com/wangshangbin/homestack/internal/publicurl"
 	"github.com/wangshangbin/homestack/internal/secure"
 	"github.com/wangshangbin/homestack/internal/securestore"
 	"github.com/wangshangbin/homestack/internal/tailscale"
@@ -108,12 +108,11 @@ func activate(arguments []string) error {
 }
 
 func validateServerURL(raw string) (string, error) {
-	parsed, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") {
-		return "", errors.New("VPS 地址必须是无凭据、无路径的 HTTPS 地址")
+	address, err := publicurl.Normalize(raw)
+	if err != nil {
+		return "", fmt.Errorf("VPS 地址无效: %w", err)
 	}
-	parsed.Path = ""
-	return strings.TrimRight(parsed.String(), "/"), nil
+	return address.URL, nil
 }
 
 func defaultCredentialOutput() string {

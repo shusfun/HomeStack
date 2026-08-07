@@ -98,20 +98,17 @@ func run() error {
 type controlSettings struct {
 	transport, address, publicURL, stateDir string
 	signingKeyPath, signingKeyID            string
-	provider, clientID, clientSecret        string
+	providers                               map[string]setupapi.ProviderCredentials
 }
 
 func loadSettings() (controlSettings, error) {
 	values := map[string]string{
-		"HOMESTACK_CONTROL_TRANSPORT":   os.Getenv("HOMESTACK_CONTROL_TRANSPORT"),
-		"HOMESTACK_CONTROL_ADDR":        os.Getenv("HOMESTACK_CONTROL_ADDR"),
-		"HOMESTACK_PUBLIC_URL":          os.Getenv("HOMESTACK_PUBLIC_URL"),
-		"HOMESTACK_STATE_DIR":           os.Getenv("HOMESTACK_STATE_DIR"),
-		"HOMESTACK_SIGNING_KEY":         os.Getenv("HOMESTACK_SIGNING_KEY"),
-		"HOMESTACK_SIGNING_KEY_ID":      os.Getenv("HOMESTACK_SIGNING_KEY_ID"),
-		"HOMESTACK_OAUTH_PROVIDER":      os.Getenv("HOMESTACK_OAUTH_PROVIDER"),
-		"HOMESTACK_OAUTH_CLIENT_ID":     os.Getenv("HOMESTACK_OAUTH_CLIENT_ID"),
-		"HOMESTACK_OAUTH_CLIENT_SECRET": os.Getenv("HOMESTACK_OAUTH_CLIENT_SECRET"),
+		"HOMESTACK_CONTROL_TRANSPORT": os.Getenv("HOMESTACK_CONTROL_TRANSPORT"),
+		"HOMESTACK_CONTROL_ADDR":      os.Getenv("HOMESTACK_CONTROL_ADDR"),
+		"HOMESTACK_PUBLIC_URL":        os.Getenv("HOMESTACK_PUBLIC_URL"),
+		"HOMESTACK_STATE_DIR":         os.Getenv("HOMESTACK_STATE_DIR"),
+		"HOMESTACK_SIGNING_KEY":       os.Getenv("HOMESTACK_SIGNING_KEY"),
+		"HOMESTACK_SIGNING_KEY_ID":    os.Getenv("HOMESTACK_SIGNING_KEY_ID"),
 	}
 	for name, value := range values {
 		if strings.TrimSpace(value) == "" {
@@ -129,11 +126,30 @@ func loadSettings() (controlSettings, error) {
 	if strings.TrimSpace(os.Getenv("HOMESTACK_TLS_CERT")) != "" || strings.TrimSpace(os.Getenv("HOMESTACK_TLS_KEY")) != "" {
 		return controlSettings{}, errors.New("Control 后端不允许配置 TLS 证书")
 	}
+	providers := map[string]setupapi.ProviderCredentials{}
+	for _, provider := range []string{"google", "github"} {
+		prefix := "HOMESTACK_" + strings.ToUpper(provider)
+		label := "GitHub"
+		if provider == "google" {
+			label = "Google"
+		}
+		credentials := setupapi.ProviderCredentials{ClientID: strings.TrimSpace(os.Getenv(prefix + "_CLIENT_ID")), ClientSecret: strings.TrimSpace(os.Getenv(prefix + "_CLIENT_SECRET"))}
+		if credentials.ClientID == "" && credentials.ClientSecret == "" {
+			continue
+		}
+		if credentials.ClientID == "" || credentials.ClientSecret == "" {
+			return controlSettings{}, fmt.Errorf("%s OAuth Client ID 和 Client Secret 必须完整配置", label)
+		}
+		providers[provider] = credentials
+	}
+	if len(providers) == 0 {
+		return controlSettings{}, errors.New("必须至少配置 Google 或 GitHub 中一种登录方式")
+	}
 	return controlSettings{
 		transport: transport, address: values["HOMESTACK_CONTROL_ADDR"], publicURL: values["HOMESTACK_PUBLIC_URL"],
 		stateDir:       values["HOMESTACK_STATE_DIR"],
 		signingKeyPath: values["HOMESTACK_SIGNING_KEY"], signingKeyID: values["HOMESTACK_SIGNING_KEY_ID"],
-		provider: values["HOMESTACK_OAUTH_PROVIDER"], clientID: values["HOMESTACK_OAUTH_CLIENT_ID"], clientSecret: values["HOMESTACK_OAUTH_CLIENT_SECRET"],
+		providers: providers,
 	}, nil
 }
 
@@ -209,21 +225,22 @@ func loadEnvFile(path string) error {
 }
 
 func createProviders(ctx context.Context, settings controlSettings) ([]*control.OAuthProvider, error) {
-	if settings.provider == "google" {
-		provider, err := control.NewOIDCProvider(ctx, "google", "Google", "https://accounts.google.com", settings.clientID, settings.clientSecret, settings.publicURL)
+	providers := make([]*control.OAuthProvider, 0, len(settings.providers))
+	if credentials, ok := settings.providers["google"]; ok {
+		provider, err := control.NewOIDCProvider(ctx, "google", "Google", "https://accounts.google.com", credentials.ClientID, credentials.ClientSecret, settings.publicURL)
 		if err != nil {
 			return nil, err
 		}
-		return []*control.OAuthProvider{provider}, nil
+		providers = append(providers, provider)
 	}
-	if settings.provider == "github" {
-		provider, err := control.NewGitHubProvider(settings.clientID, settings.clientSecret, settings.publicURL)
+	if credentials, ok := settings.providers["github"]; ok {
+		provider, err := control.NewGitHubProvider(credentials.ClientID, credentials.ClientSecret, settings.publicURL)
 		if err != nil {
 			return nil, err
 		}
-		return []*control.OAuthProvider{provider}, nil
+		providers = append(providers, provider)
 	}
-	return nil, errors.New("HOMESTACK_OAUTH_PROVIDER 只能是 google 或 github")
+	return providers, nil
 }
 
 func keygen(arguments []string) error {

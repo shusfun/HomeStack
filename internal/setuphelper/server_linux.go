@@ -87,11 +87,13 @@ func handleConnection(connection net.Conn, allowedUID uint32, manager *Manager) 
 			if err != nil {
 				response.Error = err.Error()
 			}
-		case "reconfigure":
-			if request.Config == nil {
-				response.Error = "Reconfigure 缺少配置"
+		case "reconfigure_domain":
+			response.Status, response.Error = result(manager.ReconfigureDomain(ctx, request.PublicHost))
+		case "link_provider":
+			if request.Credentials == nil {
+				response.Error = "LinkProvider 缺少 OAuth 凭据"
 			} else {
-				response.Status, response.Error = result(manager.Reconfigure(ctx, *request.Config))
+				response.Status, response.Error = result(manager.LinkProvider(ctx, request.Provider, *request.Credentials))
 			}
 		default:
 			response.Error = "Config Helper 操作不在白名单中"

@@ -15,14 +15,18 @@
 .setup-heading p { margin-top: 3px; color: #748087; font-size: 12px; }
 .setup-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 15px; }
 .setup-form label, .setup-token label { display: grid; gap: 7px; color: #56646a; font-size: 12px; font-weight: 650; }
-.setup-form select { min-width: 0; height: 38px; border: 1px solid #c7d2d5; border-radius: 6px; background: #fff; padding: 0 10px; color: #1d2529; }
+.setup-form fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
+.setup-form legend { margin-bottom: 7px; color: #56646a; font-size: 12px; font-weight: 650; }
+.segmented-control { height: 40px; padding: 3px; border: 1px solid #c7d2d5; border-radius: 6px; background: #e9edef; display: grid; grid-template-columns: repeat(2, 1fr); }
+.segmented-control button { min-width: 0; border: 0; border-radius: 4px; background: transparent; color: #66747a; font-weight: 650; }
+.segmented-control button[aria-pressed="true"] { background: #fff; color: #176b57; box-shadow: 0 1px 2px rgba(30, 45, 51, .14); }
 .setup-form output { min-width: 0; overflow-wrap: anywhere; border: 1px solid #d2dbde; border-radius: 6px; background: #fff; padding: 10px; color: #334248; font-family: ui-monospace, monospace; font-weight: 500; }
 .setup-form label:last-of-type { grid-column: 1 / -1; }
-.setup-form button { grid-column: 1 / -1; justify-self: start; }
+.setup-form > button { grid-column: 1 / -1; justify-self: start; }
 .setup-token { padding: 18vh 20px 40px; text-align: center; }
 .setup-token-mark { width: 52px; height: 52px; margin: 0 auto 14px; }
 .setup-token form { width: min(390px, 100%); margin: 24px auto 0; display: grid; gap: 12px; text-align: left; }
 .setup-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .setup-finish { margin-top: 28px; }
 .setup-center { min-height: 300px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; color: #176b57; }
-@media (max-width: 640px) { .setup-shell { padding-inline: 14px; } .setup-form { grid-template-columns: 1fr; } .setup-form label:last-of-type, .setup-form button { grid-column: 1; } }
+@media (max-width: 640px) { .setup-shell { padding-inline: 14px; } .setup-form { grid-template-columns: 1fr; } .setup-form label:last-of-type, .setup-form > button { grid-column: 1; } }

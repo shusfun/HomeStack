@@ -14,6 +14,19 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "migrate-config" {
+		if os.Geteuid() != 0 {
+			log.Fatal("配置迁移必须由 root 执行")
+		}
+		migrated, err := setuphelper.NewManager().MigrateControlEnvironment()
+		if err != nil {
+			log.Fatal(err)
+		}
+		if migrated {
+			log.Print("Control OAuth 配置已迁移为独立 Google/GitHub 字段")
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "switch" {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()

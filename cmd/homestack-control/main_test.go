@@ -46,7 +46,8 @@ func setRequiredSettings(t *testing.T) {
 		"HOMESTACK_CONTROL_TRANSPORT": "reverse-proxy", "HOMESTACK_CONTROL_ADDR": "127.0.0.1:18443",
 		"HOMESTACK_PUBLIC_URL": "https://app.example.com", "HOMESTACK_STATE_DIR": "/tmp/state",
 		"HOMESTACK_SIGNING_KEY": "/tmp/key", "HOMESTACK_SIGNING_KEY_ID": "control-test",
-		"HOMESTACK_OAUTH_PROVIDER": "github", "HOMESTACK_OAUTH_CLIENT_ID": "client", "HOMESTACK_OAUTH_CLIENT_SECRET": "secret",
+		"HOMESTACK_GOOGLE_CLIENT_ID": "", "HOMESTACK_GOOGLE_CLIENT_SECRET": "",
+		"HOMESTACK_GITHUB_CLIENT_ID": "client", "HOMESTACK_GITHUB_CLIENT_SECRET": "secret",
 		"HOMESTACK_TLS_CERT": "", "HOMESTACK_TLS_KEY": "",
 	}
 	for name, value := range values {

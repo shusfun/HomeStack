@@ -17,7 +17,8 @@ type Helper interface {
 
 type ConfigHelper interface {
 	Configuration(context.Context) (PublicConfiguration, error)
-	Reconfigure(context.Context, Configuration) (Status, error)
+	ReconfigureDomain(context.Context, string) (Status, error)
+	LinkProvider(context.Context, string, ProviderCredentials) (Status, error)
 }
 
 type SocketClient struct {
@@ -47,8 +48,12 @@ func (c SocketClient) Configuration(ctx context.Context) (PublicConfiguration, e
 	return *status.Config, nil
 }
 
-func (c SocketClient) Reconfigure(ctx context.Context, config Configuration) (Status, error) {
-	return c.call(ctx, HelperRequest{Operation: "reconfigure", Config: &config})
+func (c SocketClient) ReconfigureDomain(ctx context.Context, publicHost string) (Status, error) {
+	return c.call(ctx, HelperRequest{Operation: "reconfigure_domain", PublicHost: publicHost})
+}
+
+func (c SocketClient) LinkProvider(ctx context.Context, provider string, credentials ProviderCredentials) (Status, error) {
+	return c.call(ctx, HelperRequest{Operation: "link_provider", Provider: provider, Credentials: &credentials})
 }
 
 func (c SocketClient) call(ctx context.Context, request HelperRequest) (Status, error) {

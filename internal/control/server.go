@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -14,14 +13,12 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
 	"time"
 
-	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/wangshangbin/homestack/internal/protocol"
+	"github.com/wangshangbin/homestack/internal/publicurl"
 	"github.com/wangshangbin/homestack/internal/secure"
 	setupapi "github.com/wangshangbin/homestack/internal/setup"
-	"golang.org/x/oauth2"
 )
 
 type ServerOptions struct {
@@ -39,19 +36,17 @@ type ServerOptions struct {
 }
 
 type Server struct {
-	authenticator    Authenticator
-	owners           *OwnerStore
-	devices          *DeviceStore
-	activations      *ActivationStore
-	registration     *RegistrationService
-	configHelper     setupapi.ConfigHelper
-	signingKey       ed25519.PrivateKey
-	signingKeyID     string
-	publicURL        string
-	now              func() time.Time
-	random           io.Reader
-	switchMu         sync.Mutex
-	providerSwitches map[string]pendingProviderSwitch
+	authenticator Authenticator
+	owners        *OwnerStore
+	devices       *DeviceStore
+	activations   *ActivationStore
+	registration  *RegistrationService
+	configHelper  setupapi.ConfigHelper
+	signingKey    ed25519.PrivateKey
+	signingKeyID  string
+	publicURL     string
+	now           func() time.Time
+	random        io.Reader
 }
 
 type ticketResponse struct {
@@ -63,15 +58,6 @@ type appTokenIssuer interface {
 	IssueAppTokens(string) (AppTokens, error)
 }
 
-type pendingProviderSwitch struct {
-	OwnerID   string
-	Provider  *OAuthProvider
-	Config    setupapi.Configuration
-	Verifier  string
-	Nonce     string
-	ExpiresAt time.Time
-}
-
 type reauthAuthorizer interface {
 	ConsumeReauth(*http.Request, string) bool
 }
@@ -80,8 +66,8 @@ func NewServer(options ServerOptions) (*Server, error) {
 	if options.Authenticator == nil || options.Owners == nil || options.Devices == nil {
 		return nil, errors.New("Control 依赖未完整配置")
 	}
-	if len(options.Authenticator.Metadata()) != 1 {
-		return nil, errors.New("Control 必须且只能配置一个 OAuth 登录方式")
+	if len(options.Authenticator.Metadata()) == 0 {
+		return nil, errors.New("Control 必须至少配置一个可用的 OAuth 登录方式")
 	}
 	if len(options.SigningKey) != ed25519.PrivateKeySize || options.SigningKeyID == "" {
 		return nil, errors.New("Control Ed25519 签名密钥配置无效")
@@ -108,7 +94,11 @@ func NewServer(options ServerOptions) (*Server, error) {
 			return nil, err
 		}
 	}
-	return &Server{authenticator: options.Authenticator, owners: options.Owners, devices: options.Devices, activations: options.Activations, registration: options.Registration, configHelper: options.ConfigHelper, signingKey: options.SigningKey, signingKeyID: options.SigningKeyID, publicURL: strings.TrimRight(options.PublicURL, "/"), now: options.Now, random: options.Random, providerSwitches: map[string]pendingProviderSwitch{}}, nil
+	server := &Server{authenticator: options.Authenticator, owners: options.Owners, devices: options.Devices, activations: options.Activations, registration: options.Registration, configHelper: options.ConfigHelper, signingKey: options.SigningKey, signingKeyID: options.SigningKeyID, publicURL: strings.TrimRight(options.PublicURL, "/"), now: options.Now, random: options.Random}
+	if manager, ok := options.Authenticator.(*AuthManager); ok && options.ConfigHelper != nil {
+		manager.SetProviderLinker(providerLinkService{owners: options.Owners, helper: options.ConfigHelper})
+	}
+	return server, nil
 }
 
 func (s *Server) Handler(static http.Handler) http.Handler {
@@ -125,8 +115,7 @@ func (s *Server) Handler(static http.Handler) http.Handler {
 	mux.HandleFunc("GET /api/me", s.me)
 	mux.HandleFunc("GET /api/system/config", s.systemConfig)
 	mux.HandleFunc("POST /api/system/reconfigure", s.reconfigure)
-	mux.HandleFunc("POST /api/system/provider-switch", s.startProviderSwitch)
-	mux.HandleFunc("GET /auth/provider-switch/callback/{provider}", s.completeProviderSwitch)
+	mux.HandleFunc("POST /api/system/providers/{provider}/link", s.linkProvider)
 	mux.HandleFunc("POST /api/device-activations", s.createActivation)
 	mux.HandleFunc("POST /api/auth/app/activate", s.activateApp)
 	mux.HandleFunc("POST /api/devices/register", s.registerDevice)
@@ -155,7 +144,17 @@ func (s *Server) systemConfig(writer http.ResponseWriter, request *http.Request)
 		writeControlError(writer, http.StatusBadGateway, "config_failed", err.Error())
 		return
 	}
-	writeJSON(writer, http.StatusOK, config)
+	owner, _ := s.owners.Owner()
+	configured := map[string]setupapi.PublicProviderConfiguration{}
+	for _, provider := range config.Providers {
+		configured[provider.ID] = provider
+	}
+	providers := make([]map[string]any, 0, 2)
+	for _, id := range []string{"google", "github"} {
+		provider, exists := configured[id]
+		providers = append(providers, map[string]any{"id": id, "label": providerLabel(id), "configured": exists, "linked": ownerHasProvider(owner, id), "client_id": provider.ClientID})
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"public_host": config.PublicHost, "providers": providers})
 }
 
 func (s *Server) reconfigure(writer http.ResponseWriter, request *http.Request) {
@@ -184,8 +183,13 @@ func (s *Server) reconfigure(writer http.ResponseWriter, request *http.Request) 
 		writeControlError(writer, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	body.PublicHost = strings.ToLower(strings.TrimSpace(body.PublicHost))
-	if body.Confirmation != body.PublicHost {
+	address, err := publicurl.Normalize(body.PublicHost)
+	if err != nil {
+		writeControlError(writer, http.StatusBadRequest, "invalid_configuration", err.Error())
+		return
+	}
+	confirmation, err := publicurl.Normalize(body.Confirmation)
+	if err != nil || confirmation.Host != address.Host {
 		writeControlError(writer, http.StatusBadRequest, "confirmation_mismatch", "确认文本必须与新域名一致")
 		return
 	}
@@ -194,27 +198,20 @@ func (s *Server) reconfigure(writer http.ResponseWriter, request *http.Request) 
 		writeControlError(writer, http.StatusBadGateway, "config_failed", err.Error())
 		return
 	}
-	config := setupapi.Configuration{PublicHost: body.PublicHost, Provider: current.Provider, ClientID: current.ClientID, ClientSecret: "preserved-by-helper"}
-	if err := setupapi.ValidateConfiguration(config); err != nil {
-		writeControlError(writer, http.StatusBadRequest, "invalid_configuration", err.Error())
-		return
-	}
-	if err := preflightControlDomain(request.Context(), body.PublicHost); err != nil {
+	if err := preflightControlDomain(request.Context(), address.Host); err != nil {
 		writeControlError(writer, http.StatusBadRequest, "preflight_failed", err.Error())
 		return
 	}
-	config.ClientSecret = ""
-	status, err := s.configHelper.Reconfigure(request.Context(), config)
+	status, err := s.configHelper.ReconfigureDomain(request.Context(), address.Host)
 	if err != nil {
 		writeControlError(writer, http.StatusBadGateway, "reconfigure_failed", err.Error())
 		return
 	}
-	newURL := "https://" + body.PublicHost
+	newURL := address.URL
 	if err := s.devices.UpdateControlURL(newURL, s.now().UTC(), func(deviceConfig protocol.SignedDeviceConfig) (string, error) {
 		return secure.SignJWS(s.signingKey, s.signingKeyID, deviceConfig)
 	}); err != nil {
-		rollback := setupapi.Configuration{PublicHost: current.PublicHost, Provider: current.Provider, ClientID: current.ClientID}
-		_, rollbackErr := s.configHelper.Reconfigure(request.Context(), rollback)
+		_, rollbackErr := s.configHelper.ReconfigureDomain(request.Context(), current.PublicHost)
 		if rollbackErr != nil {
 			err = fmt.Errorf("%v；恢复旧域名失败: %w", err, rollbackErr)
 		}
@@ -228,18 +225,13 @@ func (s *Server) reconfigure(writer http.ResponseWriter, request *http.Request) 
 	writeJSON(writer, http.StatusAccepted, map[string]any{"status": status, "target_url": newURL})
 }
 
-func (s *Server) startProviderSwitch(writer http.ResponseWriter, request *http.Request) {
+func (s *Server) linkProvider(writer http.ResponseWriter, request *http.Request) {
 	identity, ok := s.requireIdentity(writer, request)
 	if !ok {
 		return
 	}
 	if request.Header.Get("Authorization") != "" || !s.validWriteOrigin(request) {
-		writeControlError(writer, http.StatusForbidden, "origin_rejected", "登录源切换只接受当前浏览器会话")
-		return
-	}
-	authorizer, ok := s.authenticator.(reauthAuthorizer)
-	if !ok || !authorizer.ConsumeReauth(request, identity.Subject) {
-		writeControlError(writer, http.StatusForbidden, "reauthentication_required", "登录源切换需要先用当前登录方式重新认证")
+		writeControlError(writer, http.StatusForbidden, "origin_rejected", "绑定登录方式只接受当前浏览器会话")
 		return
 	}
 	if s.configHelper == nil {
@@ -247,7 +239,6 @@ func (s *Server) startProviderSwitch(writer http.ResponseWriter, request *http.R
 		return
 	}
 	var body struct {
-		Provider     string `json:"provider"`
 		ClientID     string `json:"client_id"`
 		ClientSecret string `json:"client_secret"`
 		Confirmation string `json:"confirmation"`
@@ -256,113 +247,55 @@ func (s *Server) startProviderSwitch(writer http.ResponseWriter, request *http.R
 		writeControlError(writer, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	body.Provider, body.ClientID, body.ClientSecret = strings.ToLower(strings.TrimSpace(body.Provider)), strings.TrimSpace(body.ClientID), strings.TrimSpace(body.ClientSecret)
+	providerID := strings.ToLower(strings.TrimSpace(request.PathValue("provider")))
+	body.ClientID, body.ClientSecret = strings.TrimSpace(body.ClientID), strings.TrimSpace(body.ClientSecret)
+	if body.Confirmation != providerID {
+		writeControlError(writer, http.StatusBadRequest, "confirmation_mismatch", "确认文本必须与新登录方式 ID 一致")
+		return
+	}
 	current, err := s.configHelper.Configuration(request.Context())
 	if err != nil {
 		writeControlError(writer, http.StatusBadGateway, "config_failed", err.Error())
 		return
 	}
-	if body.Provider == current.Provider {
-		writeControlError(writer, http.StatusBadRequest, "provider_unchanged", "新登录源必须与当前登录源不同")
-		return
+	for _, configured := range current.Providers {
+		if configured.ID == providerID {
+			writeControlError(writer, http.StatusConflict, "provider_configured", "该登录方式已经配置")
+			return
+		}
 	}
-	if body.Confirmation != body.Provider {
-		writeControlError(writer, http.StatusBadRequest, "confirmation_mismatch", "确认文本必须与新登录源 ID 一致")
-		return
-	}
-	config := setupapi.Configuration{PublicHost: current.PublicHost, Provider: body.Provider, ClientID: body.ClientID, ClientSecret: body.ClientSecret}
-	if err := setupapi.ValidateConfiguration(config); err != nil {
+	config, err := setupapi.NormalizeConfiguration(setupapi.Configuration{PublicHost: current.PublicHost, Providers: map[string]setupapi.ProviderCredentials{providerID: {ClientID: body.ClientID, ClientSecret: body.ClientSecret}}})
+	if err != nil {
 		writeControlError(writer, http.StatusBadRequest, "invalid_configuration", err.Error())
 		return
 	}
+	credentials := config.Providers[providerID]
 	var provider *OAuthProvider
-	if body.Provider == "google" {
-		provider, err = NewOIDCProvider(request.Context(), "google", "Google", "https://accounts.google.com", body.ClientID, body.ClientSecret, s.publicURL)
+	if providerID == "google" {
+		provider, err = NewOIDCProvider(request.Context(), "google", "Google", "https://accounts.google.com", credentials.ClientID, credentials.ClientSecret, s.publicURL)
+	} else if providerID == "github" {
+		provider, err = NewGitHubProvider(credentials.ClientID, credentials.ClientSecret, s.publicURL)
 	} else {
-		provider, err = NewGitHubProvider(body.ClientID, body.ClientSecret, s.publicURL)
+		err = errors.New("登录方式只能是 Google 或 GitHub")
 	}
 	if err != nil {
 		writeControlError(writer, http.StatusBadGateway, "provider_failed", err.Error())
 		return
 	}
-	provider.OAuth.RedirectURL = s.publicURL + "/auth/provider-switch/callback/" + provider.ID
-	state, err := randomToken(s.random, 32)
+	authorizer, authorized := s.authenticator.(reauthAuthorizer)
+	starter, supported := s.authenticator.(interface {
+		BeginProviderLink(string, *OAuthProvider, setupapi.ProviderCredentials) (string, error)
+	})
+	if !authorized || !supported || !authorizer.ConsumeReauth(request, identity.Subject) {
+		writeControlError(writer, http.StatusForbidden, "reauthentication_required", "绑定登录方式需要先用当前登录方式重新认证")
+		return
+	}
+	authorizationURL, err := starter.BeginProviderLink(identity.Subject, provider, credentials)
 	if err != nil {
-		writeControlError(writer, http.StatusInternalServerError, "random_failed", err.Error())
+		writeControlError(writer, http.StatusBadRequest, "provider_link_failed", err.Error())
 		return
 	}
-	verifier, err := randomToken(s.random, 64)
-	if err != nil {
-		writeControlError(writer, http.StatusInternalServerError, "random_failed", err.Error())
-		return
-	}
-	nonce, err := randomToken(s.random, 32)
-	if err != nil {
-		writeControlError(writer, http.StatusInternalServerError, "random_failed", err.Error())
-		return
-	}
-	s.switchMu.Lock()
-	for key, pending := range s.providerSwitches {
-		if !s.now().UTC().Before(pending.ExpiresAt) {
-			delete(s.providerSwitches, key)
-		}
-	}
-	s.providerSwitches[state] = pendingProviderSwitch{OwnerID: identity.Subject, Provider: provider, Config: config, Verifier: verifier, Nonce: nonce, ExpiresAt: s.now().UTC().Add(5 * time.Minute)}
-	s.switchMu.Unlock()
-	digest := sha256.Sum256([]byte(verifier))
-	options := []oauth2.AuthCodeOption{oauth2.SetAuthURLParam("code_challenge", base64.RawURLEncoding.EncodeToString(digest[:])), oauth2.SetAuthURLParam("code_challenge_method", "S256"), oauth2.SetAuthURLParam("prompt", "login")}
-	if provider.Kind == "oidc" {
-		options = append(options, oidc.Nonce(nonce))
-	}
-	writeJSON(writer, http.StatusAccepted, map[string]string{"authorization_url": provider.OAuth.AuthCodeURL(state, options...)})
-}
-
-func (s *Server) completeProviderSwitch(writer http.ResponseWriter, request *http.Request) {
-	state := request.URL.Query().Get("state")
-	s.switchMu.Lock()
-	pending, ok := s.providerSwitches[state]
-	delete(s.providerSwitches, state)
-	s.switchMu.Unlock()
-	if !ok || !s.now().UTC().Before(pending.ExpiresAt) || pending.Provider == nil || pending.Provider.ID != request.PathValue("provider") {
-		http.Error(writer, "登录源切换状态无效或已过期", http.StatusBadRequest)
-		return
-	}
-	identity, err := s.authenticator.Authenticate(request.Context(), request)
-	if err != nil || identity.Subject != pending.OwnerID {
-		http.Error(writer, "登录源切换缺少当前 Owner 会话", http.StatusUnauthorized)
-		return
-	}
-	if message := request.URL.Query().Get("error"); message != "" {
-		http.Error(writer, "新登录源拒绝授权: "+message, http.StatusUnauthorized)
-		return
-	}
-	token, err := pending.Provider.OAuth.Exchange(request.Context(), request.URL.Query().Get("code"), oauth2.SetAuthURLParam("code_verifier", pending.Verifier))
-	if err != nil {
-		http.Error(writer, "兑换新登录源授权码失败: "+err.Error(), http.StatusBadGateway)
-		return
-	}
-	external, err := pending.Provider.externalIdentity(request.Context(), token, pending.Nonce)
-	if err != nil {
-		http.Error(writer, err.Error(), http.StatusUnauthorized)
-		return
-	}
-	previous, err := s.owners.ReplaceIdentity(pending.OwnerID, external)
-	if err != nil {
-		http.Error(writer, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if _, err := s.configHelper.Reconfigure(request.Context(), pending.Config); err != nil {
-		if restoreErr := s.owners.RestoreOwner(previous); restoreErr != nil {
-			err = fmt.Errorf("%v；恢复 Owner 身份失败: %w", err, restoreErr)
-		}
-		http.Error(writer, err.Error(), http.StatusBadGateway)
-		return
-	}
-	if err := s.owners.RevokeAllSessions(); err != nil {
-		http.Error(writer, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	http.Redirect(writer, request, "/?provider_switch="+url.QueryEscape(pending.Provider.ID), http.StatusSeeOther)
+	writeJSON(writer, http.StatusAccepted, map[string]string{"authorization_url": authorizationURL})
 }
 
 func preflightControlDomain(ctx context.Context, host string) error {

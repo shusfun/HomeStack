@@ -33,26 +33,73 @@ type fileBackup struct {
 
 // Manager 是唯一拥有 Control 系统配置写权限的 Helper 核心。
 type Manager struct {
-	StatePath     string
-	CompletedPath string
-	BackupPath    string
-	ControlEnv    string
-	TokenPath     string
-	SessionPath   string
-	HTTPClient    *http.Client
-	Command       func(context.Context, string, ...string) ([]byte, error)
-	Chown         func(string, ...string) error
-	Now           func() time.Time
-	mu            sync.Mutex
+	StatePath           string
+	CompletedPath       string
+	BackupPath          string
+	MigrationBackupPath string
+	ControlEnv          string
+	TokenPath           string
+	SessionPath         string
+	HTTPClient          *http.Client
+	Command             func(context.Context, string, ...string) ([]byte, error)
+	Chown               func(string, ...string) error
+	Now                 func() time.Time
+	mu                  sync.Mutex
 }
 
 func NewManager() *Manager {
 	return &Manager{
 		StatePath: "/var/lib/homestack-setup/state.json", CompletedPath: "/var/lib/homestack-setup/completed.json",
 		BackupPath: "/var/lib/homestack-setup/control-env.backup.json", ControlEnv: "/etc/homestack/control.env",
-		TokenPath: "/etc/homestack/setup-token.sha256", SessionPath: "/etc/homestack/setup-session.json",
+		MigrationBackupPath: "/etc/homestack/control.env.pre-0.2.1",
+		TokenPath:           "/etc/homestack/setup-token.sha256", SessionPath: "/etc/homestack/setup-session.json",
 		HTTPClient: &http.Client{Timeout: 5 * time.Second}, Command: runWhitelistedCommand, Chown: chownFiles, Now: time.Now,
 	}
+}
+
+func (m *Manager) MigrateControlEnvironment() (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	data, err := os.ReadFile(m.ControlEnv)
+	if err != nil {
+		return false, err
+	}
+	values, err := parseEnvironment(data)
+	if err != nil {
+		return false, err
+	}
+	hasLegacy := values["HOMESTACK_OAUTH_PROVIDER"] != "" || values["HOMESTACK_OAUTH_CLIENT_ID"] != "" || values["HOMESTACK_OAUTH_CLIENT_SECRET"] != ""
+	hasCurrent := values["HOMESTACK_GOOGLE_CLIENT_ID"] != "" || values["HOMESTACK_GOOGLE_CLIENT_SECRET"] != "" || values["HOMESTACK_GITHUB_CLIENT_ID"] != "" || values["HOMESTACK_GITHUB_CLIENT_SECRET"] != ""
+	if hasLegacy && hasCurrent {
+		return false, errors.New("Control 同时包含旧版与新版 OAuth 字段，拒绝自动迁移")
+	}
+	if !hasLegacy {
+		if _, err := m.readControlEnvironment(); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	provider := strings.ToLower(strings.TrimSpace(values["HOMESTACK_OAUTH_PROVIDER"]))
+	config, err := setupapi.NormalizeConfiguration(setupapi.Configuration{PublicHost: values["HOMESTACK_PUBLIC_URL"], Providers: map[string]setupapi.ProviderCredentials{provider: {ClientID: values["HOMESTACK_OAUTH_CLIENT_ID"], ClientSecret: values["HOMESTACK_OAUTH_CLIENT_SECRET"]}}})
+	if err != nil {
+		return false, fmt.Errorf("旧 Control OAuth 配置无效: %w", err)
+	}
+	if _, err := os.Stat(m.MigrationBackupPath); errors.Is(err, os.ErrNotExist) {
+		if err := atomicWrite(m.MigrationBackupPath, data, 0o600); err != nil {
+			return false, fmt.Errorf("备份旧 Control 配置失败: %w", err)
+		}
+	} else if err != nil {
+		return false, err
+	}
+	if err := atomicWrite(m.ControlEnv, controlEnvironment(config), 0o600); err != nil {
+		return false, err
+	}
+	if err := m.Chown("homestack-control", m.ControlEnv); err != nil {
+		_ = atomicWrite(m.ControlEnv, data, 0o600)
+		_ = m.Chown("homestack-control", m.ControlEnv)
+		return false, fmt.Errorf("设置迁移后 Control 配置权限失败: %w", err)
+	}
+	return true, nil
 }
 
 func (m *Manager) Status() (setupapi.Status, error) {
@@ -74,7 +121,9 @@ func (m *Manager) Status() (setupapi.Status, error) {
 func (m *Manager) Prepare(ctx context.Context, config setupapi.Configuration) (setupapi.Status, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if err := setupapi.ValidateConfiguration(config); err != nil {
+	var err error
+	config, err = setupapi.NormalizeConfiguration(config)
+	if err != nil {
 		return setupapi.Status{}, err
 	}
 	status, err := m.Status()
@@ -145,10 +194,10 @@ func (m *Manager) Configuration() (setupapi.PublicConfiguration, error) {
 	if err != nil {
 		return setupapi.PublicConfiguration{}, err
 	}
-	return setupapi.PublicConfiguration{PublicHost: config.PublicHost, Provider: config.Provider, ClientID: config.ClientID}, nil
+	return setupapi.PublicConfigurationFor(config), nil
 }
 
-func (m *Manager) Reconfigure(ctx context.Context, config setupapi.Configuration) (setupapi.Status, error) {
+func (m *Manager) ReconfigureDomain(ctx context.Context, publicHost string) (setupapi.Status, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, err := os.Stat(m.CompletedPath); err != nil {
@@ -158,12 +207,37 @@ func (m *Manager) Reconfigure(ctx context.Context, config setupapi.Configuration
 	if err != nil {
 		return setupapi.Status{}, err
 	}
-	if config.Provider == current.Provider && config.ClientID == current.ClientID && config.ClientSecret == "" {
-		config.ClientSecret = current.ClientSecret
-	}
-	if err := setupapi.ValidateConfiguration(config); err != nil {
+	current.PublicHost = publicHost
+	config, err := setupapi.NormalizeConfiguration(current)
+	if err != nil {
 		return setupapi.Status{}, err
 	}
+	return m.applyConfiguration(ctx, config)
+}
+
+func (m *Manager) LinkProvider(ctx context.Context, provider string, credentials setupapi.ProviderCredentials) (setupapi.Status, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, err := os.Stat(m.CompletedPath); err != nil {
+		return setupapi.Status{}, errors.New("Setup 尚未完成")
+	}
+	current, err := m.readControlEnvironment()
+	if err != nil {
+		return setupapi.Status{}, err
+	}
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if _, exists := current.Providers[provider]; exists {
+		return setupapi.Status{}, errors.New("该登录方式已经配置")
+	}
+	current.Providers[provider] = credentials
+	config, err := setupapi.NormalizeConfiguration(current)
+	if err != nil {
+		return setupapi.Status{}, err
+	}
+	return m.applyConfiguration(ctx, config)
+}
+
+func (m *Manager) applyConfiguration(ctx context.Context, config setupapi.Configuration) (setupapi.Status, error) {
 	backup, err := os.ReadFile(m.ControlEnv)
 	if err != nil {
 		return setupapi.Status{}, err
@@ -171,6 +245,8 @@ func (m *Manager) Reconfigure(ctx context.Context, config setupapi.Configuration
 	rollback := func(failure error) (setupapi.Status, error) {
 		if restoreErr := atomicWrite(m.ControlEnv, backup, 0o600); restoreErr != nil {
 			failure = fmt.Errorf("%v；恢复 Control 配置失败: %w", failure, restoreErr)
+		} else if restoreErr := m.Chown("homestack-control", m.ControlEnv); restoreErr != nil {
+			failure = fmt.Errorf("%v；恢复 Control 配置权限失败: %w", failure, restoreErr)
 		}
 		return setupapi.Status{}, failure
 	}
@@ -186,7 +262,7 @@ func (m *Manager) Reconfigure(ctx context.Context, config setupapi.Configuration
 	if _, err := m.Command(ctx, "systemd-run", "--unit=homestack-control-restart", "--replace", "--on-active=2s", "--property=Type=oneshot", "systemctl", "restart", "homestack-control.service"); err != nil {
 		return rollback(err)
 	}
-	public := setupapi.PublicConfiguration{PublicHost: config.PublicHost, Provider: config.Provider, ClientID: config.ClientID}
+	public := setupapi.PublicConfigurationFor(config)
 	return setupapi.Status{Phase: setupapi.PhaseCompleted, Config: &public, UpdatedAt: m.Now().UTC()}, nil
 }
 
@@ -249,6 +325,26 @@ func (m *Manager) readControlEnvironment() (setupapi.Configuration, error) {
 	if err != nil {
 		return setupapi.Configuration{}, err
 	}
+	values, err := parseEnvironment(data)
+	if err != nil {
+		return setupapi.Configuration{}, err
+	}
+	config := setupapi.Configuration{PublicHost: values["HOMESTACK_PUBLIC_URL"], Providers: map[string]setupapi.ProviderCredentials{}}
+	for _, provider := range []string{"google", "github"} {
+		prefix := "HOMESTACK_" + strings.ToUpper(provider)
+		clientID, clientSecret := values[prefix+"_CLIENT_ID"], values[prefix+"_CLIENT_SECRET"]
+		if clientID != "" || clientSecret != "" {
+			config.Providers[provider] = setupapi.ProviderCredentials{ClientID: clientID, ClientSecret: clientSecret}
+		}
+	}
+	config, err = setupapi.NormalizeConfiguration(config)
+	if err != nil {
+		return setupapi.Configuration{}, fmt.Errorf("读取当前 Control 配置失败: %w", err)
+	}
+	return config, nil
+}
+
+func parseEnvironment(data []byte) (map[string]string, error) {
 	values := map[string]string{}
 	for _, line := range strings.Split(string(data), "\n") {
 		if line == "" {
@@ -256,16 +352,11 @@ func (m *Manager) readControlEnvironment() (setupapi.Configuration, error) {
 		}
 		name, value, ok := strings.Cut(line, "=")
 		if !ok {
-			return setupapi.Configuration{}, errors.New("Control 环境文件格式无效")
+			return nil, errors.New("Control 环境文件格式无效")
 		}
 		values[name] = value
 	}
-	publicURL := strings.TrimPrefix(values["HOMESTACK_PUBLIC_URL"], "https://")
-	config := setupapi.Configuration{PublicHost: publicURL, Provider: values["HOMESTACK_OAUTH_PROVIDER"], ClientID: values["HOMESTACK_OAUTH_CLIENT_ID"], ClientSecret: values["HOMESTACK_OAUTH_CLIENT_SECRET"]}
-	if err := setupapi.ValidateConfiguration(config); err != nil {
-		return setupapi.Configuration{}, fmt.Errorf("读取当前 Control 配置失败: %w", err)
-	}
-	return config, nil
+	return values, nil
 }
 
 func controlEnvironment(config setupapi.Configuration) []byte {
@@ -275,19 +366,37 @@ func controlEnvironment(config setupapi.Configuration) []byte {
 		"HOMESTACK_STATE_DIR=/var/lib/homestack-control\n" +
 		"HOMESTACK_SIGNING_KEY=/etc/homestack/control-signing.key\n" +
 		"HOMESTACK_SIGNING_KEY_ID=homestack-control\n"
-	return []byte(prefix + "HOMESTACK_OAUTH_PROVIDER=" + config.Provider + "\n" +
-		"HOMESTACK_OAUTH_CLIENT_ID=" + config.ClientID + "\n" +
-		"HOMESTACK_OAUTH_CLIENT_SECRET=" + config.ClientSecret + "\n")
+	var providers strings.Builder
+	for _, provider := range []string{"google", "github"} {
+		credentials := config.Providers[provider]
+		name := strings.ToUpper(provider)
+		providers.WriteString("HOMESTACK_" + name + "_CLIENT_ID=" + credentials.ClientID + "\n")
+		providers.WriteString("HOMESTACK_" + name + "_CLIENT_SECRET=" + credentials.ClientSecret + "\n")
+	}
+	return []byte(prefix + providers.String())
 }
 
 func samePublicConfig(current *setupapi.PublicConfiguration, target setupapi.Configuration) bool {
-	return current != nil && current.PublicHost == target.PublicHost && current.Provider == target.Provider && current.ClientID == target.ClientID
+	if current == nil {
+		return false
+	}
+	public := setupapi.PublicConfigurationFor(target)
+	if current.PublicHost != public.PublicHost || len(current.Providers) != len(public.Providers) {
+		return false
+	}
+	for index := range current.Providers {
+		if current.Providers[index] != public.Providers[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func statusFromState(state persistedState) setupapi.Status {
 	status := setupapi.Status{Phase: state.Phase, Error: state.Error, UpdatedAt: state.UpdatedAt}
 	if state.Config != nil {
-		status.Config = &setupapi.PublicConfiguration{PublicHost: state.Config.PublicHost, Provider: state.Config.Provider, ClientID: state.Config.ClientID}
+		public := setupapi.PublicConfigurationFor(*state.Config)
+		status.Config = &public
 	}
 	return status
 }

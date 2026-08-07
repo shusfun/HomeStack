@@ -97,38 +97,55 @@ func (s *OwnerStore) AuthenticateOrClaim(external ExternalIdentity) (Identity, e
 	return identityForOwner(*s.state.Owner, external), nil
 }
 
-func (s *OwnerStore) ReplaceIdentity(ownerID string, external ExternalIdentity) (Owner, error) {
+func (s *OwnerStore) AddIdentity(ownerID string, external ExternalIdentity) error {
 	if err := validateExternalIdentity(external); err != nil {
-		return Owner{}, err
+		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.state.Owner == nil || s.state.Owner.ID != ownerID {
-		return Owner{}, ErrUnauthenticated
-	}
-	previous := *s.state.Owner
-	previous.Identities = append([]IdentityKey(nil), s.state.Owner.Identities...)
-	s.state.Owner.Identities = []IdentityKey{{Provider: external.Provider, Subject: external.Subject}}
-	s.state.Owner.Email, s.state.Owner.Name = external.Email, external.Name
-	if err := s.saveLocked(); err != nil {
-		*s.state.Owner = previous
-		return Owner{}, err
-	}
-	return previous, nil
-}
-
-func (s *OwnerStore) RestoreOwner(owner Owner) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.state.Owner == nil || s.state.Owner.ID != owner.ID {
 		return ErrUnauthenticated
 	}
-	current := *s.state.Owner
-	restored := owner
-	restored.Identities = append([]IdentityKey(nil), owner.Identities...)
-	s.state.Owner = &restored
+	key := IdentityKey{Provider: external.Provider, Subject: external.Subject}
+	if containsIdentity(s.state.Owner.Identities, key) {
+		return nil
+	}
+	for _, identity := range s.state.Owner.Identities {
+		if identity.Provider == external.Provider {
+			return errors.New("该登录方式已经绑定其他身份")
+		}
+	}
+	previous := append([]IdentityKey(nil), s.state.Owner.Identities...)
+	s.state.Owner.Identities = append(s.state.Owner.Identities, key)
 	if err := s.saveLocked(); err != nil {
-		s.state.Owner = &current
+		s.state.Owner.Identities = previous
+		return err
+	}
+	return nil
+}
+
+func (s *OwnerStore) RemoveIdentity(ownerID string, key IdentityKey) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state.Owner == nil || s.state.Owner.ID != ownerID {
+		return ErrUnauthenticated
+	}
+	if len(s.state.Owner.Identities) <= 1 {
+		return errors.New("不能移除 Owner 的唯一登录身份")
+	}
+	previous := append([]IdentityKey(nil), s.state.Owner.Identities...)
+	filtered := s.state.Owner.Identities[:0]
+	for _, identity := range s.state.Owner.Identities {
+		if identity != key {
+			filtered = append(filtered, identity)
+		}
+	}
+	if len(filtered) == len(previous) {
+		return nil
+	}
+	s.state.Owner.Identities = filtered
+	if err := s.saveLocked(); err != nil {
+		s.state.Owner.Identities = previous
 		return err
 	}
 	return nil

@@ -1,28 +1,38 @@
-import { ExternalLink, HardDrive, KeyRound, LogIn, LogOut, Plus, RefreshCw, Settings, Trash2, Unplug } from "lucide-react";
+import { ExternalLink, Github, HardDrive, KeyRound, LogOut, Plus, RefreshCw, Settings, Trash2, Unplug } from "lucide-react";
 import { type FormEvent, useCallback, useEffect, useState } from "react";
-import { NavLink, Route, Routes } from "react-router-dom";
+import { Navigate, NavLink, Route, Routes } from "react-router-dom";
 import { api } from "./api";
 import { BrandMark } from "./BrandMark";
+import { normalizePublicAddress, type OAuthProviderID } from "./publicAddress";
 import type { DeviceView } from "./types";
 import { CenteredLoader, EmptyState, Feedback, StatusPill, connectionTone, errorMessage } from "./ui";
 
-interface Me { subject: string; email: string; name: string; identities: { provider: string; subject: string }[] }
-interface Provider { id: string; label: string }
+interface Me { subject: string; email: string; name: string; identities: { provider: OAuthProviderID; subject: string }[] }
+interface Provider { id: OAuthProviderID; label: string }
+interface ProviderConfiguration extends Provider { configured: boolean; linked: boolean; client_id: string }
+interface SystemConfiguration { public_host: string; providers: ProviderConfiguration[] }
 
 export function ControlApp() {
   const [me, setMe] = useState<Me | null>(null); const [providers, setProviders] = useState<Provider[]>([]);
   const [checked, setChecked] = useState(false); const [error, setError] = useState("");
-  const switchingProvider = new URLSearchParams(location.search).has("provider_switch");
-  useEffect(() => { if (!switchingProvider) return; const timer = window.setTimeout(() => location.replace("/"), 3500); return () => window.clearTimeout(timer); }, [switchingProvider]);
   useEffect(() => {
     Promise.all([api<{ providers: Provider[] }>("/api/meta"), api<Me>("/api/me").catch(() => null)])
       .then(([meta, identity]) => { setProviders(meta.providers); setMe(identity); }).catch((reason) => setError(errorMessage(reason))).finally(() => setChecked(true));
   }, []);
-  if (switchingProvider) return <CenteredLoader label="切换登录方式" />;
   if (!checked) return <CenteredLoader label="验证身份" />;
-  if (!me) return <main className="control-login"><BrandMark className="login-mark" /><h1>HomeStack Control</h1><div className="provider-list">{providers.map((provider) => <a key={provider.id} href={`/auth/login/${encodeURIComponent(provider.id)}?return=/`}><LogIn size={16} />{provider.label}</a>)}</div><Feedback error={error} /></main>;
+  if (!me) {
+    if (location.pathname !== "/login") return <Navigate to="/login" replace />;
+    return <main className="control-login"><div className="control-login-content"><div className="control-login-brand"><BrandMark className="login-mark" /></div><h1>登录 HomeStack</h1><p>使用此服务器已配置的身份继续</p><div className={`control-provider-list${providers.length === 1 ? " single" : ""}`}>{providers.map((provider) => <a key={provider.id} href={`/auth/login/${encodeURIComponent(provider.id)}?return=/`}><ProviderIcon provider={provider.id} />使用 {provider.label} 登录</a>)}</div><Feedback error={error} /></div></main>;
+  }
+  if (location.pathname === "/login") return <Navigate to="/" replace />;
   async function logout() { try { await api<void>("/auth/logout", { method: "POST" }); location.assign("/"); } catch (reason) { setError(errorMessage(reason)); } }
-  return <div className="control-shell"><header><div className="chrome-brand"><BrandMark className="brand-mark" /><strong>HomeStack</strong><small>Control</small></div><nav><NavLink to="/"><HardDrive size={16} />设备</NavLink><NavLink to="/activate"><Plus size={16} />激活</NavLink><NavLink to="/identity"><KeyRound size={16} />身份</NavLink><NavLink to="/settings/domains"><Settings size={16} />域名</NavLink><button onClick={() => void logout()}><LogOut size={16} />退出</button></nav></header><main><Routes><Route path="/" element={<ControlDevices me={me} />} /><Route path="/activate" element={<ActivationPage />} /><Route path="/identity" element={<IdentityPage me={me} providers={providers} />} /><Route path="/settings/domains" element={<DomainSettings provider={providers[0]} />} /><Route path="*" element={<ControlDevices me={me} />} /></Routes><Feedback error={error} /></main></div>;
+  const currentProvider = me.identities[0]?.provider;
+  return <div className="control-shell"><header><div className="chrome-brand"><BrandMark className="brand-mark" /><strong>HomeStack</strong><small>Control</small></div><nav><NavLink to="/"><HardDrive size={16} />设备</NavLink><NavLink to="/activate"><Plus size={16} />激活</NavLink><NavLink to="/identity"><KeyRound size={16} />身份</NavLink><NavLink to="/settings/domains"><Settings size={16} />域名</NavLink><button onClick={() => void logout()}><LogOut size={16} />退出</button></nav></header><main><Routes><Route path="/" element={<ControlDevices me={me} />} /><Route path="/activate" element={<ActivationPage />} /><Route path="/identity" element={<IdentityPage me={me} />} /><Route path="/settings/domains" element={<DomainSettings provider={currentProvider ? { id: currentProvider, label: currentProvider === "google" ? "Google" : "GitHub" } : undefined} />} /><Route path="*" element={<ControlDevices me={me} />} /></Routes><Feedback error={error} /></main></div>;
+}
+
+function ProviderIcon({ provider }: { provider: OAuthProviderID }) {
+  if (provider === "github") return <Github size={21} strokeWidth={2.2} aria-hidden="true" />;
+  return <svg className="google-icon" viewBox="0 0 24 24" aria-hidden="true"><path fill="#4285F4" d="M21.6 12.23c0-.71-.06-1.4-.18-2.07H12v3.92h5.38a4.6 4.6 0 0 1-2 3.02v2.54h3.24c1.9-1.75 2.98-4.33 2.98-7.41Z"/><path fill="#34A853" d="M12 22c2.7 0 4.97-.9 6.62-2.43l-3.24-2.54c-.9.6-2.05.96-3.38.96-2.61 0-4.82-1.76-5.61-4.13H3.04v2.62A10 10 0 0 0 12 22Z"/><path fill="#FBBC05" d="M6.39 13.86A6 6 0 0 1 6.08 12c0-.65.11-1.28.31-1.86V7.52H3.04A10 10 0 0 0 2 12c0 1.61.39 3.14 1.04 4.48l3.35-2.62Z"/><path fill="#EA4335" d="M12 6.01c1.47 0 2.79.51 3.82 1.5l2.87-2.87A9.64 9.64 0 0 0 12 2a10 10 0 0 0-8.96 5.52l3.35 2.62C7.18 7.77 9.39 6.01 12 6.01Z"/></svg>;
 }
 
 function ControlDevices({ me }: { me: Me }) {
@@ -39,12 +49,16 @@ function ActivationPage() {
   return <section className="page"><h1>激活 App 与 Node</h1><p className="muted">在已安装 HomeStack 的设备中填写此单次激活码。</p>{result ? <div className="settings-list"><div><span>激活码</span><strong>{result.code}</strong></div><div><span>有效期</span><strong>{new Date(result.expires_at).toLocaleString("zh-CN")}</strong></div></div> : <button className="primary-button" disabled={busy} onClick={() => void create()}><Plus size={16} />生成激活码</button>}<Feedback error={error} /></section>;
 }
 
-function IdentityPage({ me, providers }: { me: Me; providers: Provider[] }) {
-  const current = providers[0]; const target = current?.id === "google" ? "github" : "google";
+function IdentityPage({ me }: { me: Me }) {
+  const [configuration, setConfiguration] = useState<SystemConfiguration | null>(null);
   const [clientID, setClientID] = useState(""); const [clientSecret, setClientSecret] = useState(""); const [confirmation, setConfirmation] = useState(""); const [error, setError] = useState("");
   const reauthenticated = new URLSearchParams(location.search).get("reauthenticated") === "1";
-  async function submit(event: FormEvent) { event.preventDefault(); setError(""); try { const result = await api<{ authorization_url: string }>("/api/system/provider-switch", { method: "POST", body: JSON.stringify({ provider: target, client_id: clientID, client_secret: clientSecret, confirmation }) }); location.assign(result.authorization_url); } catch (reason) { setError(errorMessage(reason)); } }
-  return <section className="page"><h1>登录身份</h1><div className="settings-list"><div><span>登录方式</span><strong>{current?.label || "-"}</strong></div><div><span>Owner</span><strong>{me.name || me.email}</strong></div></div><form className="form-grid" onSubmit={(event) => void submit(event)}><h2>切换到 {target === "google" ? "Google" : "GitHub"}</h2><label>新 OAuth 回调地址<output>{`${location.origin}/auth/provider-switch/callback/${target}`}</output></label><label>OAuth Client ID<input value={clientID} onChange={(event) => setClientID(event.target.value)} required /></label><label>OAuth Client Secret<input type="password" value={clientSecret} onChange={(event) => setClientSecret(event.target.value)} required /></label><a className="secondary-button" href={`/auth/reauth/${encodeURIComponent(current?.id || "")}?return=/identity`}>{reauthenticated ? "已重新认证" : `使用 ${current?.label || "当前登录方式"} 重新认证`}</a><label>输入 {target} 确认<input value={confirmation} onChange={(event) => setConfirmation(event.target.value)} required /></label><button className="primary-button" disabled={!reauthenticated || confirmation !== target}><KeyRound size={16} />验证新登录源</button></form><Feedback error={error} /></section>;
+  useEffect(() => { api<SystemConfiguration>("/api/system/config").then(setConfiguration).catch((reason) => setError(errorMessage(reason))); }, []);
+  const target = configuration?.providers.find((provider) => !provider.configured);
+  const currentID = me.identities[0]?.provider || "";
+  const currentLabel = currentID === "google" ? "Google" : "GitHub";
+  async function submit(event: FormEvent) { event.preventDefault(); if (!target) return; setError(""); try { const result = await api<{ authorization_url: string }>(`/api/system/providers/${encodeURIComponent(target.id)}/link`, { method: "POST", body: JSON.stringify({ client_id: clientID, client_secret: clientSecret, confirmation }) }); location.assign(result.authorization_url); } catch (reason) { setError(errorMessage(reason)); } }
+  return <section className="page"><h1>登录身份</h1><div className="settings-list"><div><span>Owner</span><strong>{me.name || me.email}</strong></div>{configuration?.providers.map((provider) => <div key={provider.id}><span>{provider.label}</span><strong>{provider.linked ? "已绑定" : provider.configured ? "已配置" : "未配置"}</strong></div>)}</div>{target && <form className="form-grid provider-link-form" onSubmit={(event) => void submit(event)}><h2>绑定 {target.label}</h2><label>OAuth 回调地址<output>{`${location.origin}/auth/callback/${target.id}`}</output></label><label>OAuth Client ID<input value={clientID} onChange={(event) => setClientID(event.target.value)} required /></label><label>OAuth Client Secret<input type="password" autoComplete="new-password" value={clientSecret} onChange={(event) => setClientSecret(event.target.value)} required /></label><a className="secondary-button" href={`/auth/reauth/${encodeURIComponent(currentID)}?return=/identity`}>{reauthenticated ? "已重新认证" : `使用 ${currentLabel} 重新认证`}</a><label>输入 {target.id} 确认<input value={confirmation} onChange={(event) => setConfirmation(event.target.value)} required /></label><button className="primary-button" disabled={!reauthenticated || confirmation !== target.id}><KeyRound size={16} />验证并绑定 {target.label}</button></form>}<Feedback error={error} /></section>;
 }
 
 function DomainSettings({ provider }: { provider?: Provider }) {
@@ -52,5 +66,6 @@ function DomainSettings({ provider }: { provider?: Provider }) {
   const reauthenticated = new URLSearchParams(location.search).get("reauthenticated") === "1";
   useEffect(() => { api<{ public_host: string }>("/api/system/config").then((config) => setHost(config.public_host)).catch((reason) => setError(errorMessage(reason))); }, []);
   async function submit(event: FormEvent) { event.preventDefault(); setBusy(true); setError(""); try { const result = await api<{ target_url: string }>("/api/system/reconfigure", { method: "POST", body: JSON.stringify({ public_host: host, confirmation }) }); location.assign(result.target_url); } catch (reason) { setError(errorMessage(reason)); setBusy(false); } }
-  return <section className="page"><h1>VPS 域名</h1><form className="form-grid" onSubmit={(event) => void submit(event)}><label>新域名<input value={host} onChange={(event) => setHost(event.target.value)} required /></label><a className="secondary-button" href={`/auth/reauth/${encodeURIComponent(provider?.id || "")}`}>{reauthenticated ? "已重新认证" : `使用 ${provider?.label || "当前登录方式"} 重新认证`}</a><label>输入新域名确认<input value={confirmation} onChange={(event) => setConfirmation(event.target.value)} required /></label><button className="primary-button" disabled={busy || !reauthenticated || confirmation !== host}><Settings size={16} />应用域名</button></form><Feedback error={error} /></section>;
+  const target = normalizePublicAddress(host); const confirmed = normalizePublicAddress(confirmation); const matches = Boolean(target && confirmed && target.host === confirmed.host);
+  return <section className="page"><h1>VPS 域名</h1><form className="form-grid" onSubmit={(event) => void submit(event)}><label>新域名<input value={host} onChange={(event) => setHost(event.target.value)} required /></label><a className="secondary-button" href={`/auth/reauth/${encodeURIComponent(provider?.id || "")}`}>{reauthenticated ? "已重新认证" : `使用 ${provider?.label || "当前登录方式"} 重新认证`}</a><label>输入新域名确认<input value={confirmation} onChange={(event) => setConfirmation(event.target.value)} required /></label><button className="primary-button" disabled={busy || !reauthenticated || !matches}><Settings size={16} />应用域名</button></form><Feedback error={error} /></section>;
 }

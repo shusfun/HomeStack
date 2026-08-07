@@ -16,7 +16,7 @@ HomeStack Linux 安装器
   install.sh control
   install.sh agent
   install.sh upgrade control
-  install.sh agent --version v0.2.0
+  install.sh agent --version v0.2.1
 
 Control 需要 root；Agent 必须以最终使用者身份运行，不能使用 sudo。
 EOF
@@ -178,6 +178,12 @@ install_control() {
   install -d -m 0750 -o homestack-control -g homestack-control /etc/homestack
   install -d -m 0700 -o root -g root /var/lib/homestack-setup
   install -d -m 0750 -o homestack-control -g homestack-control /var/lib/homestack-control
+  if [[ -x /usr/local/bin/homestack-control ]]; then
+    cp -p /usr/local/bin/homestack-control "$work_dir/previous-homestack-control"
+  fi
+  if [[ -x /usr/local/libexec/homestack-config-helper ]]; then
+    cp -p /usr/local/libexec/homestack-config-helper "$work_dir/previous-homestack-config-helper"
+  fi
   install -m 0755 "$binary" /usr/local/bin/homestack-control
   install -m 0755 "$work_dir/archive/homestack-config-helper" /usr/local/libexec/homestack-config-helper
   cp -R "$work_dir/archive/deploy/." "$INSTALL_ROOT/deploy/"
@@ -192,6 +198,7 @@ install_control() {
   if [[ ! -e /etc/homestack/control.env ]]; then
     install -m 0600 "$work_dir/archive/deploy/env/control.env.example" /etc/homestack/control.env
   fi
+  /usr/local/libexec/homestack-config-helper migrate-config
   if grep -Eq 'REPLACE_WITH_|example\.com' /etc/homestack/control.env; then
     setup_needed="true"
     if [[ ! -e "$INSTALL_ROOT/control.env.pre-setup" ]]; then
@@ -211,8 +218,24 @@ install_control() {
   chown homestack-control:homestack-control /etc/homestack/control-signing.key /etc/homestack/control-signing.pub
   chmod 0600 /etc/homestack/control-signing.key
   chmod 0644 /etc/homestack/control-signing.pub
+  if [[ "$setup_needed" == "false" ]]; then
+    if ! /usr/local/bin/homestack-control configtest --env-file /etc/homestack/control.env; then
+      if [[ -f /etc/homestack/control.env.pre-0.2.1 ]]; then
+        install -m 0600 -o homestack-control -g homestack-control /etc/homestack/control.env.pre-0.2.1 /etc/homestack/control.env
+      fi
+      if [[ -f "$work_dir/previous-homestack-control" ]]; then
+        install -m 0755 "$work_dir/previous-homestack-control" /usr/local/bin/homestack-control
+      fi
+      if [[ -f "$work_dir/previous-homestack-config-helper" ]]; then
+        install -m 0755 "$work_dir/previous-homestack-config-helper" /usr/local/libexec/homestack-config-helper
+      fi
+      fail "迁移后的 Control 配置校验失败，已恢复升级前配置和二进制"
+    fi
+  fi
 
   systemctl daemon-reload
+  systemctl enable homestack-config-helper.service
+  systemctl restart homestack-config-helper.service
   if [[ "$setup_needed" == "true" && ! -e /var/lib/homestack-setup/completed.json ]]; then
     if [[ "$reset_setup_token" == "true" ]]; then
       rm -f -- /etc/homestack/setup-token.sha256 /etc/homestack/setup-session.json
@@ -225,8 +248,7 @@ install_control() {
       install -m 0400 -o homestack-control -g homestack-control "$work_dir/setup-token.sha256" /etc/homestack/setup-token.sha256
     fi
     systemctl disable --now homestack-control.service >/dev/null 2>&1 || true
-    systemctl enable homestack-config-helper.service homestack-setup.service
-    systemctl restart homestack-config-helper.service
+    systemctl enable homestack-setup.service
     systemctl restart homestack-setup.service
     echo "Setup 端口: http://127.0.0.1:18443"
     if [[ -n "$setup_token" ]]; then

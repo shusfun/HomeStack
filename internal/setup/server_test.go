@@ -20,7 +20,8 @@ type fakeHelper struct{ status Status }
 
 func (f *fakeHelper) Status(context.Context) (Status, error) { return f.status, nil }
 func (f *fakeHelper) Prepare(_ context.Context, config Configuration) (Status, error) {
-	f.status = Status{Phase: PhaseIdentity, Config: &PublicConfiguration{PublicHost: config.PublicHost, Provider: config.Provider, ClientID: config.ClientID}, UpdatedAt: time.Now().UTC()}
+	public := PublicConfigurationFor(config)
+	f.status = Status{Phase: PhaseIdentity, Config: &public, UpdatedAt: time.Now().UTC()}
 	return f.status, nil
 }
 func (f *fakeHelper) Finalize(context.Context) (Status, error) {
@@ -45,23 +46,28 @@ func TestSetupSessionRequiresLoopbackHTTPSProxyAndToken(t *testing.T) {
 	}
 }
 
-func TestValidateConfigurationAllowsExactlyOneProvider(t *testing.T) {
-	config := Configuration{PublicHost: "home.example.com", Provider: "google", ClientID: "client", ClientSecret: "secret"}
+func TestValidateConfigurationAllowsOneOrTwoProviders(t *testing.T) {
+	config := Configuration{PublicHost: "home.example.com", Providers: map[string]ProviderCredentials{"google": {ClientID: "client", ClientSecret: "secret"}}}
 	if err := ValidateConfiguration(config); err != nil {
 		t.Fatal(err)
 	}
-	config.Provider = "pocket"
+	config.Providers["github"] = ProviderCredentials{ClientID: "github-client", ClientSecret: "github-secret"}
+	if err := ValidateConfiguration(config); err != nil {
+		t.Fatal(err)
+	}
+	config.Providers["pocket"] = ProviderCredentials{ClientID: "client", ClientSecret: "secret"}
 	if err := ValidateConfiguration(config); err == nil {
 		t.Fatal("非 Google/GitHub 登录必须被拒绝")
 	}
-	config.Provider, config.ClientSecret = "github", ""
+	delete(config.Providers, "pocket")
+	config.Providers["github"] = ProviderCredentials{ClientID: "github-client"}
 	if err := ValidateConfiguration(config); err == nil {
 		t.Fatal("空 Secret 必须被拒绝")
 	}
 }
 
 func TestStatusNeverReturnsClientSecret(t *testing.T) {
-	helper := &fakeHelper{status: Status{Phase: PhaseIdentity, Config: &PublicConfiguration{PublicHost: "home.example.com", Provider: "github", ClientID: "client"}}}
+	helper := &fakeHelper{status: Status{Phase: PhaseIdentity, Config: &PublicConfiguration{PublicHost: "home.example.com", Providers: []PublicProviderConfiguration{{ID: "github", ClientID: "client"}}}}}
 	server := newTestServer(t, helper)
 	response := httptest.NewRecorder()
 	server.Handler(nil).ServeHTTP(response, validSetupRequest(http.MethodGet, "/api/setup/status", ""))

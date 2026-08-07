@@ -14,11 +14,11 @@ DNS 必须直接解析到 VPS，TLS 由宝塔终止。HomeStack 不写入或重�
 
 首次安装后访问 `/setup`，输入安装器输出的一次性令牌，然后填写：
 
-- VPS 域名，例如 `home.example.com`
+- VPS 地址，例如 `home.example.com`、`https://home.example.com` 或 `https://home.example.com/`；通过 HTTPS 域名访问 Setup 时会自动回填
 - Google 或 GitHub，二选一
 - OAuth Client ID 和 Client Secret
 
-回调地址固定为 `https://<VPS域名>/auth/callback/<provider>`。Setup 完成后安装接口永久锁定，第一个成功 OAuth 登录者认领唯一 Owner。
+切换登录方式时页面会立即更新回调地址；Google 使用 `/auth/callback/google`，GitHub 使用 `/auth/callback/github`。Setup 完成后安装接口永久锁定并进入登录页，第一个成功 OAuth 登录者认领唯一 Owner，登录成功后进入设备管理。
 
 ## 设备
 
@@ -39,4 +39,4 @@ Node 后端监听 `127.0.0.1:19444`，Tailscale Serve 使用 `19443`。如果该
 
 更换 VPS 域名前，先让新旧域名同时反代 `127.0.0.1:18443`。Owner 在 Control 使用当前登录源重新认证并确认新域名；Control 校验新域名 DNS、TLS 和健康接口后更新在线 Node 配置、使现有会话失效并切换域名，不需要重装。
 
-Google 与 GitHub 的切换同样要求当前身份重新认证。新 OAuth 应用必须同时配置页面显示的 `/auth/provider-switch/callback/<provider>` 和正式 `/auth/callback/<provider>` 回调；新身份验证成功后，Control 保持 Owner ID 不变，原子替换登录源配置和 Owner 身份，然后要求重新登录。
+Owner 可在“登录身份”中使用当前登录方式重新认证，再绑定另一套 Google 或 GitHub OAuth 凭据。两种登录身份都归属同一个 Owner，不按邮箱自动合并，也不会替换原有登录方式；绑定与普通登录共用 `/auth/callback/<provider>`。

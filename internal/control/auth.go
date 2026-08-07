@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
+	setupapi "github.com/wangshangbin/homestack/internal/setup"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/github"
 )
@@ -95,6 +96,8 @@ type pendingLogin struct {
 	ClientState     string
 	ClientChallenge string
 	OwnerID         string
+	Candidate       *OAuthProvider
+	Credentials     setupapi.ProviderCredentials
 	ExpiresAt       time.Time
 }
 
@@ -111,7 +114,12 @@ type AuthManager struct {
 	pending      map[string]pendingLogin
 	appCodes     map[string]appCode
 	reauthGrants map[string]time.Time
+	linker       ProviderLinker
 	now          func() time.Time
+}
+
+type ProviderLinker interface {
+	LinkProvider(context.Context, string, ExternalIdentity, setupapi.ProviderCredentials) error
 }
 
 func NewAuthManager(providers []*OAuthProvider, store *OwnerStore) (*AuthManager, error) {
@@ -129,14 +137,67 @@ func NewAuthManager(providers []*OAuthProvider, store *OwnerStore) (*AuthManager
 }
 
 func (a *AuthManager) Metadata() []ProviderMetadata {
+	a.mu.Lock()
+	providers := make(map[string]*OAuthProvider, len(a.providers))
+	for id, provider := range a.providers {
+		providers[id] = provider
+	}
+	a.mu.Unlock()
+	owner, claimed := a.store.Owner()
 	order := []string{"google", "github"}
-	result := make([]ProviderMetadata, 0, len(a.providers))
+	result := make([]ProviderMetadata, 0, len(providers))
 	for _, id := range order {
-		if provider := a.providers[id]; provider != nil {
+		provider := providers[id]
+		if provider != nil && (!claimed || ownerHasProvider(owner, id)) {
 			result = append(result, ProviderMetadata{ID: provider.ID, Label: provider.Label})
 		}
 	}
 	return result
+}
+
+func (a *AuthManager) SetProviderLinker(linker ProviderLinker) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.linker = linker
+}
+
+func (a *AuthManager) BeginProviderLink(ownerID string, provider *OAuthProvider, credentials setupapi.ProviderCredentials) (string, error) {
+	if provider == nil || provider.ID == "" || ownerID == "" {
+		return "", errors.New("第二登录方式配置不完整")
+	}
+	a.mu.Lock()
+	if a.linker == nil {
+		a.mu.Unlock()
+		return "", errors.New("登录方式绑定服务未配置")
+	}
+	if a.providers[provider.ID] != nil {
+		a.mu.Unlock()
+		return "", errors.New("该登录方式已经配置")
+	}
+	a.mu.Unlock()
+	state, err := randomStoreToken(32)
+	if err != nil {
+		return "", err
+	}
+	verifier, err := randomStoreToken(64)
+	if err != nil {
+		return "", err
+	}
+	nonce, err := randomStoreToken(32)
+	if err != nil {
+		return "", err
+	}
+	pending := pendingLogin{Provider: provider.ID, Mode: "link", OwnerID: ownerID, Candidate: provider, Credentials: credentials, Verifier: verifier, Nonce: nonce, ExpiresAt: a.now().UTC().Add(5 * time.Minute)}
+	a.mu.Lock()
+	a.pruneLocked()
+	a.pending[state] = pending
+	a.mu.Unlock()
+	digest := sha256.Sum256([]byte(verifier))
+	options := []oauth2.AuthCodeOption{oauth2.SetAuthURLParam("code_challenge", base64.RawURLEncoding.EncodeToString(digest[:])), oauth2.SetAuthURLParam("code_challenge_method", "S256"), oauth2.SetAuthURLParam("prompt", "login")}
+	if provider.Kind == "oidc" {
+		options = append(options, oidc.Nonce(nonce))
+	}
+	return provider.OAuth.AuthCodeURL(state, options...), nil
 }
 
 func (a *AuthManager) Authenticate(_ context.Context, request *http.Request) (Identity, error) {
@@ -170,8 +231,9 @@ func (a *AuthManager) startReauth(writer http.ResponseWriter, request *http.Requ
 		http.Error(writer, err.Error(), http.StatusUnauthorized)
 		return
 	}
-	provider := a.providers[request.PathValue("provider")]
-	if provider == nil || len(a.providers) != 1 {
+	provider := a.provider(request.PathValue("provider"))
+	owner, exists := a.store.Owner()
+	if provider == nil || !exists || owner.ID != identity.Subject || !ownerHasProvider(owner, provider.ID) {
 		http.Error(writer, "重新认证必须使用当前登录方式", http.StatusBadRequest)
 		return
 	}
@@ -202,9 +264,13 @@ func (a *AuthManager) startAppLogin(writer http.ResponseWriter, request *http.Re
 }
 
 func (a *AuthManager) start(writer http.ResponseWriter, request *http.Request, pending pendingLogin) {
-	provider := a.providers[request.PathValue("provider")]
+	provider := a.provider(request.PathValue("provider"))
 	if provider == nil {
 		http.Error(writer, "不支持的登录方式", http.StatusNotFound)
+		return
+	}
+	if owner, claimed := a.store.Owner(); claimed && !ownerHasProvider(owner, provider.ID) {
+		http.Error(writer, "该登录方式尚未绑定到 HomeStack 所有者", http.StatusForbidden)
 		return
 	}
 	state, err := randomStoreToken(32)
@@ -258,7 +324,21 @@ func (a *AuthManager) completeLogin(writer http.ResponseWriter, request *http.Re
 		http.Error(writer, "登录提供商拒绝授权: "+message, http.StatusUnauthorized)
 		return
 	}
-	provider := a.providers[pending.Provider]
+	if pending.Mode == "link" {
+		identity, err := a.Authenticate(request.Context(), request)
+		if err != nil || identity.Subject != pending.OwnerID {
+			http.Error(writer, "绑定登录方式缺少当前 Owner 会话", http.StatusUnauthorized)
+			return
+		}
+	}
+	provider := pending.Candidate
+	if provider == nil {
+		provider = a.provider(pending.Provider)
+	}
+	if provider == nil {
+		http.Error(writer, "登录方式配置已变化", http.StatusConflict)
+		return
+	}
 	token, err := provider.OAuth.Exchange(request.Context(), request.URL.Query().Get("code"), oauth2.SetAuthURLParam("code_verifier", pending.Verifier))
 	if err != nil {
 		http.Error(writer, "兑换 OAuth 授权码失败: "+err.Error(), http.StatusBadGateway)
@@ -267,6 +347,24 @@ func (a *AuthManager) completeLogin(writer http.ResponseWriter, request *http.Re
 	external, err := provider.externalIdentity(request.Context(), token, pending.Nonce)
 	if err != nil {
 		http.Error(writer, err.Error(), http.StatusUnauthorized)
+		return
+	}
+	if pending.Mode == "link" {
+		a.mu.Lock()
+		linker := a.linker
+		a.mu.Unlock()
+		if linker == nil {
+			http.Error(writer, "登录方式绑定服务未配置", http.StatusServiceUnavailable)
+			return
+		}
+		if err := linker.LinkProvider(request.Context(), pending.OwnerID, external, pending.Credentials); err != nil {
+			http.Error(writer, err.Error(), http.StatusBadGateway)
+			return
+		}
+		a.mu.Lock()
+		a.providers[provider.ID] = provider
+		a.mu.Unlock()
+		http.Redirect(writer, request, "/identity?provider_linked="+url.QueryEscape(provider.ID), http.StatusSeeOther)
 		return
 	}
 	if pending.Mode == "reauth" {
@@ -303,6 +401,21 @@ func (a *AuthManager) completeLogin(writer http.ResponseWriter, request *http.Re
 	}
 	http.SetCookie(writer, &http.Cookie{Name: "homestack_control_session", Value: raw, Path: "/", Expires: expiresAt, Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode})
 	http.Redirect(writer, request, pending.ReturnURL, http.StatusSeeOther)
+}
+
+func (a *AuthManager) provider(id string) *OAuthProvider {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.providers[id]
+}
+
+func ownerHasProvider(owner Owner, provider string) bool {
+	for _, identity := range owner.Identities {
+		if identity.Provider == provider {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *AuthManager) ConsumeReauth(request *http.Request, ownerID string) bool {
