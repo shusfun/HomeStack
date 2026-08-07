@@ -17,13 +17,13 @@ func TestAccessTicketCanOnlyBeRedeemedOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
-	store, err := OpenSessionStore("", "device-1", "https://app.example.com:8443", publicKey, "control-1")
+	store, err := OpenSessionStore("", "device-1", "https://app.example.com", publicKey, "control-1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	store.now = func() time.Time { return now }
-	claims := protocol.AccessTicketClaimsV1{
-		Version: protocol.AccessTicketVersion, Issuer: "https://app.example.com:8443", Subject: "user-1", DeviceID: "device-1",
+	claims := protocol.AccessTicketClaims{
+		Issuer: "https://app.example.com", Subject: "user-1", DeviceID: "device-1",
 		Nonce: "nonce-1", IssuedAt: now, ExpiresAt: now.Add(30 * time.Second),
 	}
 	signed, err := secure.SignJWS(privateKey, "control-1", claims)

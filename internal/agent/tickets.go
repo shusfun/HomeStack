@@ -55,12 +55,12 @@ func OpenSessionStore(path, deviceID, issuer string, publicKey ed25519.PublicKey
 }
 
 func (s *SessionStore) Redeem(signed string) (string, error) {
-	var claims protocol.AccessTicketClaimsV1
+	var claims protocol.AccessTicketClaims
 	if err := secure.VerifyJWS(signed, s.publicKey, s.keyID, &claims); err != nil {
 		return "", fmt.Errorf("验证访问票据失败: %w", err)
 	}
 	now := s.now().UTC()
-	if claims.Version != protocol.AccessTicketVersion || claims.DeviceID != s.deviceID || claims.Issuer != s.issuer {
+	if claims.DeviceID != s.deviceID || claims.Issuer != s.issuer {
 		return "", errors.New("访问票据与当前设备不匹配")
 	}
 	if claims.Nonce == "" || claims.Subject == "" || !now.Before(claims.ExpiresAt) || claims.IssuedAt.After(now.Add(30*time.Second)) {

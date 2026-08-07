@@ -3,20 +3,14 @@ package setuphelper
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,28 +18,6 @@ import (
 
 	setupapi "github.com/wangshangbin/homestack/internal/setup"
 )
-
-const staticAPIUserID = "00000000-0000-0000-0000-000000000000"
-
-type asset struct {
-	Component   string
-	Version     string
-	URL         string
-	SHA256      string
-	Target      string
-	VersionArgs []string
-}
-
-var linuxAssets = map[string][]asset{
-	"amd64": {
-		{Component: "headscale", Version: "0.29.3", URL: "https://github.com/juanfont/headscale/releases/download/v0.29.3/headscale_0.29.3_linux_amd64", SHA256: "8dc183758024ed7095cf610fedea0790233613c71353bc8be2715d82ba29b92c", Target: "/usr/local/bin/headscale", VersionArgs: []string{"version"}},
-		{Component: "pocket-id", Version: "2.12.0", URL: "https://github.com/pocket-id/pocket-id/releases/download/v2.12.0/pocket-id_linux_amd64", SHA256: "0f27f55f6597986f9998ba0594c9eb4ef73fab01521d2795edf2ebce06c8448e", Target: "/usr/local/bin/pocket-id", VersionArgs: []string{"version"}},
-	},
-	"arm64": {
-		{Component: "headscale", Version: "0.29.3", URL: "https://github.com/juanfont/headscale/releases/download/v0.29.3/headscale_0.29.3_linux_arm64", SHA256: "ecf0099f9aa1efb56e7c74718342a493f7d44a840626a2877ca526e675040f4e", Target: "/usr/local/bin/headscale", VersionArgs: []string{"version"}},
-		{Component: "pocket-id", Version: "2.12.0", URL: "https://github.com/pocket-id/pocket-id/releases/download/v2.12.0/pocket-id_linux_arm64", SHA256: "217fa73d99564883b5ec8f4d5fed0a691922308bd757999daddb12ac66f9dd16", Target: "/usr/local/bin/pocket-id", VersionArgs: []string{"version"}},
-	},
-}
 
 type persistedState struct {
 	Phase     setupapi.Phase          `json:"phase"`
@@ -59,32 +31,27 @@ type fileBackup struct {
 	Data   []byte `json:"data,omitempty"`
 }
 
-type finalizeBackup struct {
-	ControlEnv      fileBackup `json:"control_env"`
-	HeadscaleConfig fileBackup `json:"headscale_config"`
-	HeadscalePolicy fileBackup `json:"headscale_policy"`
-	HeadscaleSecret fileBackup `json:"headscale_secret"`
-	SetupToken      fileBackup `json:"setup_token"`
-	SetupSession    fileBackup `json:"setup_session"`
-}
-
+// Manager 是唯一拥有 Control 系统配置写权限的 Helper 核心。
 type Manager struct {
-	StatePath          string
-	CompletedPath      string
-	FinalizeBackupPath string
-	TemplateRoot       string
-	HTTPClient         *http.Client
-	Command            func(context.Context, string, ...string) ([]byte, error)
-	Now                func() time.Time
-	Random             io.Reader
-	mu                 sync.Mutex
+	StatePath     string
+	CompletedPath string
+	BackupPath    string
+	ControlEnv    string
+	TokenPath     string
+	SessionPath   string
+	HTTPClient    *http.Client
+	Command       func(context.Context, string, ...string) ([]byte, error)
+	Chown         func(string, ...string) error
+	Now           func() time.Time
+	mu            sync.Mutex
 }
 
 func NewManager() *Manager {
 	return &Manager{
-		StatePath: "/var/lib/homestack-setup/state.json", CompletedPath: "/var/lib/homestack-setup/completed.json", FinalizeBackupPath: "/var/lib/homestack-setup/finalize-backup.json",
-		TemplateRoot: "/usr/local/share/homestack/deploy", HTTPClient: &http.Client{Timeout: 5 * time.Minute},
-		Command: runWhitelistedCommand, Now: time.Now, Random: rand.Reader,
+		StatePath: "/var/lib/homestack-setup/state.json", CompletedPath: "/var/lib/homestack-setup/completed.json",
+		BackupPath: "/var/lib/homestack-setup/control-env.backup.json", ControlEnv: "/etc/homestack/control.env",
+		TokenPath: "/etc/homestack/setup-token.sha256", SessionPath: "/etc/homestack/setup-session.json",
+		HTTPClient: &http.Client{Timeout: 5 * time.Second}, Command: runWhitelistedCommand, Chown: chownFiles, Now: time.Now,
 	}
 }
 
@@ -96,7 +63,7 @@ func (m *Manager) Status() (setupapi.Status, error) {
 	}
 	state, err := m.readState()
 	if errors.Is(err, os.ErrNotExist) {
-		return setupapi.Status{Phase: setupapi.PhaseInfrastructure, UpdatedAt: m.Now().UTC()}, nil
+		return setupapi.Status{Phase: setupapi.PhaseDomain, UpdatedAt: m.Now().UTC()}, nil
 	}
 	if err != nil {
 		return setupapi.Status{}, err
@@ -114,64 +81,31 @@ func (m *Manager) Prepare(ctx context.Context, config setupapi.Configuration) (s
 	if err != nil {
 		return setupapi.Status{}, err
 	}
-	if status.Phase == setupapi.PhaseCompleted {
-		return status, errors.New("Setup 已完成并永久锁定")
+	if status.Phase == setupapi.PhaseCompleted || status.Phase == setupapi.PhaseFinalize {
+		return status, errors.New("Setup 已锁定，不能修改配置")
 	}
-	if status.Phase == setupapi.PhasePocketID {
-		if status.Config != nil && *status.Config == config {
-			return status, nil
-		}
-		return status, errors.New("基础设施已写入，不允许更换域名后重复 Prepare")
+	if status.Phase == setupapi.PhaseIdentity && samePublicConfig(status.Config, config) {
+		return status, nil
 	}
-	if runtime.GOOS != "linux" {
-		return status, errors.New("Setup Helper 只支持 Linux")
+	if err := m.ensureBackup(); err != nil {
+		return m.recordFailure(config, setupapi.PhaseDomain, err)
 	}
-	assets := linuxAssets[runtime.GOARCH]
-	if len(assets) != 2 {
-		return status, fmt.Errorf("不支持的 Linux 架构: %s", runtime.GOARCH)
+	if err := m.writeState(persistedState{Phase: setupapi.PhaseDomain, Config: &config, UpdatedAt: m.Now().UTC()}); err != nil {
+		return setupapi.Status{}, err
 	}
-	if err := m.writeState(persistedState{Phase: setupapi.PhaseInfrastructure, Config: &config, UpdatedAt: m.Now().UTC()}); err != nil {
-		return status, err
+	env := controlEnvironment(config)
+	if err := atomicWrite(m.ControlEnv, env, 0o600); err != nil {
+		return m.rollbackPrepare(config, err)
 	}
-	fail := func(failure error) (setupapi.Status, error) {
-		if _, statErr := os.Stat("/etc/systemd/system/pocket-id.service"); statErr == nil {
-			if _, cleanupErr := m.Command(ctx, "systemctl", "disable", "--now", "pocket-id.service"); cleanupErr != nil {
-				failure = fmt.Errorf("%v；停止部分配置的 Pocket ID 失败: %w", failure, cleanupErr)
-			}
-		} else if !errors.Is(statErr, os.ErrNotExist) {
-			failure = fmt.Errorf("%v；检查 Pocket ID unit 失败: %w", failure, statErr)
-		}
-		return m.recordFailure(config, setupapi.PhaseInfrastructure, failure)
+	if err := m.Chown("homestack-control", m.ControlEnv); err != nil {
+		return m.rollbackPrepare(config, fmt.Errorf("设置 Control 配置权限失败: %w", err))
 	}
-	for _, item := range assets {
-		if err := m.installAsset(ctx, item); err != nil {
-			return fail(err)
-		}
+	if _, err := m.Command(ctx, "/usr/local/bin/homestack-control", "configtest", "--env-file", m.ControlEnv); err != nil {
+		return m.rollbackPrepare(config, fmt.Errorf("Control configtest 失败: %w", err))
 	}
-	if err := m.ensureSystemAccounts(ctx); err != nil {
-		return fail(err)
-	}
-	if err := m.preparePocketID(config); err != nil {
-		return fail(err)
-	}
-	if err := m.installUnits("pocket-id.service", "headscale.service", "homestack-control.service", "homestack-setup-switch.service"); err != nil {
-		return fail(err)
-	}
-	if _, err := m.Command(ctx, "systemctl", "daemon-reload"); err != nil {
-		return fail(fmt.Errorf("重载 systemd 失败: %w", err))
-	}
-	if _, err := m.Command(ctx, "systemctl", "enable", "pocket-id.service"); err != nil {
-		return fail(fmt.Errorf("启用 Pocket ID 失败: %w", err))
-	}
-	if _, err := m.Command(ctx, "systemctl", "restart", "pocket-id.service"); err != nil {
-		return fail(fmt.Errorf("启动 Pocket ID 失败: %w", err))
-	}
-	if err := m.waitForPocket(ctx); err != nil {
-		return fail(err)
-	}
-	state := persistedState{Phase: setupapi.PhasePocketID, Config: &config, UpdatedAt: m.Now().UTC()}
+	state := persistedState{Phase: setupapi.PhaseIdentity, Config: &config, UpdatedAt: m.Now().UTC()}
 	if err := m.writeState(state); err != nil {
-		return fail(err)
+		return m.rollbackPrepare(config, err)
 	}
 	return statusFromState(state), nil
 }
@@ -189,438 +123,227 @@ func (m *Manager) Finalize(ctx context.Context) (setupapi.Status, error) {
 	if state.Phase == setupapi.PhaseFinalize {
 		return statusFromState(state), nil
 	}
-	if state.Phase != setupapi.PhasePocketID || state.Config == nil {
-		return statusFromState(state), errors.New("必须先完成基础设施 Prepare")
-	}
-	if err := m.ensureFinalizeBackup(); err != nil {
-		return m.recordFailure(*state.Config, setupapi.PhasePocketID, err)
-	}
-	fail := func(failure error) (setupapi.Status, error) {
-		var rollbackErrors []string
-		if _, err := m.Command(ctx, "systemctl", "stop", "homestack-control.service", "headscale.service"); err != nil {
-			rollbackErrors = append(rollbackErrors, "停止正式服务失败: "+err.Error())
-		}
-		if err := m.restoreFinalizeBackup(); err != nil {
-			rollbackErrors = append(rollbackErrors, err.Error())
-		}
-		if len(rollbackErrors) > 0 {
-			failure = fmt.Errorf("%v；回滚失败: %s", failure, strings.Join(rollbackErrors, "；"))
-		}
-		return m.recordFailure(*state.Config, setupapi.PhasePocketID, failure)
-	}
-	apiKey, err := os.ReadFile("/etc/pocket-id/static-api-key")
-	if err != nil {
-		return fail(fmt.Errorf("读取 Pocket ID 临时 API Key 失败: %w", err))
-	}
-	client := pocketClient{baseURL: "http://127.0.0.1:8444", apiKey: strings.TrimSpace(string(apiKey)), client: m.HTTPClient}
-	admin, err := client.initialAdmin(ctx)
-	if err != nil {
-		return fail(err)
-	}
-	groupID, err := client.createGroup(ctx, admin)
-	if err != nil {
-		return fail(err)
-	}
-	controlSecret, err := randomSecret(m.Random)
-	if err != nil {
-		return fail(err)
-	}
-	headscaleSecret, err := randomSecret(m.Random)
-	if err != nil {
-		return fail(err)
-	}
-	if err := client.createOIDCClients(ctx, *state.Config, groupID, controlSecret, headscaleSecret); err != nil {
-		return fail(err)
-	}
-	if err := m.writeFinalConfiguration(*state.Config, controlSecret, headscaleSecret); err != nil {
-		return fail(err)
-	}
-	if _, err := m.Command(ctx, "/usr/local/bin/headscale", "configtest", "--config", "/etc/headscale/config.yaml"); err != nil {
-		return fail(fmt.Errorf("Headscale configtest 失败: %w", err))
-	}
-	if _, err := m.Command(ctx, "/usr/local/bin/headscale", "policy", "check", "--config", "/etc/headscale/config.yaml", "--bypass"); err != nil {
-		return fail(fmt.Errorf("Headscale policy 检查失败: %w", err))
-	}
-	if _, err := m.Command(ctx, "/usr/local/bin/homestack-control", "configtest", "--env-file", "/etc/homestack/control.env"); err != nil {
-		return fail(fmt.Errorf("Control configtest 失败: %w", err))
-	}
-	if _, err := m.Command(ctx, "systemctl", "enable", "headscale.service", "homestack-control.service"); err != nil {
-		return fail(fmt.Errorf("启用 HomeStack 服务失败: %w", err))
-	}
-	if _, err := m.Command(ctx, "systemctl", "restart", "headscale.service"); err != nil {
-		return fail(fmt.Errorf("启动 Headscale 失败: %w", err))
+	if state.Phase != setupapi.PhaseIdentity || state.Config == nil {
+		return statusFromState(state), errors.New("必须先保存域名与登录配置")
 	}
 	finalizing := persistedState{Phase: setupapi.PhaseFinalize, Config: state.Config, UpdatedAt: m.Now().UTC()}
 	if err := m.writeState(finalizing); err != nil {
-		return fail(err)
+		return statusFromState(state), err
 	}
 	if _, err := m.Command(ctx, "systemctl", "start", "--no-block", "homestack-setup-switch.service"); err != nil {
-		return fail(fmt.Errorf("启动正式服务切换任务失败: %w", err))
+		_, _ = m.recordFailure(*state.Config, setupapi.PhaseIdentity, err)
+		return statusFromState(state), fmt.Errorf("启动正式服务切换任务失败: %w", err)
 	}
 	return statusFromState(finalizing), nil
 }
 
-func (m *Manager) CompleteSwitch(ctx context.Context) error {
-	state, err := m.readState()
-	if err != nil {
-		return fmt.Errorf("读取 Setup 切换状态失败: %w", err)
+func (m *Manager) Configuration() (setupapi.PublicConfiguration, error) {
+	if _, err := os.Stat(m.CompletedPath); err != nil {
+		return setupapi.PublicConfiguration{}, errors.New("Setup 尚未完成")
 	}
-	if state.Phase != setupapi.PhaseFinalize || state.Config == nil {
+	config, err := m.readControlEnvironment()
+	if err != nil {
+		return setupapi.PublicConfiguration{}, err
+	}
+	return setupapi.PublicConfiguration{PublicHost: config.PublicHost, Provider: config.Provider, ClientID: config.ClientID}, nil
+}
+
+func (m *Manager) Reconfigure(ctx context.Context, config setupapi.Configuration) (setupapi.Status, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, err := os.Stat(m.CompletedPath); err != nil {
+		return setupapi.Status{}, errors.New("Setup 尚未完成")
+	}
+	current, err := m.readControlEnvironment()
+	if err != nil {
+		return setupapi.Status{}, err
+	}
+	if config.Provider == current.Provider && config.ClientID == current.ClientID && config.ClientSecret == "" {
+		config.ClientSecret = current.ClientSecret
+	}
+	if err := setupapi.ValidateConfiguration(config); err != nil {
+		return setupapi.Status{}, err
+	}
+	backup, err := os.ReadFile(m.ControlEnv)
+	if err != nil {
+		return setupapi.Status{}, err
+	}
+	rollback := func(failure error) (setupapi.Status, error) {
+		if restoreErr := atomicWrite(m.ControlEnv, backup, 0o600); restoreErr != nil {
+			failure = fmt.Errorf("%v；恢复 Control 配置失败: %w", failure, restoreErr)
+		}
+		return setupapi.Status{}, failure
+	}
+	if err := atomicWrite(m.ControlEnv, controlEnvironment(config), 0o600); err != nil {
+		return setupapi.Status{}, err
+	}
+	if err := m.Chown("homestack-control", m.ControlEnv); err != nil {
+		return rollback(err)
+	}
+	if _, err := m.Command(ctx, "/usr/local/bin/homestack-control", "configtest", "--env-file", m.ControlEnv); err != nil {
+		return rollback(err)
+	}
+	if _, err := m.Command(ctx, "systemd-run", "--unit=homestack-control-restart", "--replace", "--on-active=2s", "--property=Type=oneshot", "systemctl", "restart", "homestack-control.service"); err != nil {
+		return rollback(err)
+	}
+	public := setupapi.PublicConfiguration{PublicHost: config.PublicHost, Provider: config.Provider, ClientID: config.ClientID}
+	return setupapi.Status{Phase: setupapi.PhaseCompleted, Config: &public, UpdatedAt: m.Now().UTC()}, nil
+}
+
+func (m *Manager) CompleteSwitch(ctx context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	state, err := m.readState()
+	if err != nil || state.Phase != setupapi.PhaseFinalize || state.Config == nil {
 		return errors.New("Setup 未处于 finalize 阶段")
 	}
-	rollback := func(failure error, envBackup, keyBackup []byte) error {
-		var rollbackErrors []string
-		if len(envBackup) > 0 {
-			if err := atomicWrite("/etc/pocket-id/pocket-id.env", envBackup, 0o600); err != nil {
-				rollbackErrors = append(rollbackErrors, "恢复 Pocket ID 环境失败: "+err.Error())
-			} else if err := chownFiles("pocket-id", "/etc/pocket-id/pocket-id.env"); err != nil {
-				rollbackErrors = append(rollbackErrors, "恢复 Pocket ID 环境权限失败: "+err.Error())
+	rollback := func(failure error) error {
+		var failures []string
+		if err := m.restoreBackup(); err != nil {
+			failures = append(failures, err.Error())
+		}
+		for _, args := range [][]string{{"stop", "homestack-control.service"}, {"enable", "homestack-config-helper.service", "homestack-setup.service"}, {"restart", "homestack-config-helper.service"}, {"restart", "homestack-setup.service"}} {
+			if _, commandErr := m.Command(ctx, "systemctl", args...); commandErr != nil {
+				failures = append(failures, commandErr.Error())
 			}
 		}
-		if len(keyBackup) > 0 {
-			if err := atomicWrite("/etc/pocket-id/static-api-key", keyBackup, 0o600); err != nil {
-				rollbackErrors = append(rollbackErrors, "恢复 Pocket ID API Key 失败: "+err.Error())
-			} else if err := chownFiles("pocket-id", "/etc/pocket-id/static-api-key"); err != nil {
-				rollbackErrors = append(rollbackErrors, "恢复 API Key 权限失败: "+err.Error())
-			}
+		if len(failures) > 0 {
+			failure = fmt.Errorf("%v；回滚失败: %s", failure, strings.Join(failures, "；"))
 		}
-		if err := m.restoreFinalizeBackup(); err != nil {
-			rollbackErrors = append(rollbackErrors, err.Error())
-		}
-		for _, command := range [][]string{{"disable", "--now", "homestack-maintenance-helper.service"}, {"stop", "homestack-control.service", "headscale.service"}, {"restart", "pocket-id.service"}, {"enable", "homestack-setup-helper.service", "homestack-setup.service"}, {"restart", "homestack-setup-helper.service"}, {"restart", "homestack-setup.service"}} {
-			if _, err := m.Command(ctx, "systemctl", command...); err != nil {
-				rollbackErrors = append(rollbackErrors, strings.Join(command, " ")+": "+err.Error())
-			}
-		}
-		message := failure.Error()
-		if len(rollbackErrors) > 0 {
-			message += "；回滚失败: " + strings.Join(rollbackErrors, "；")
-		}
-		_, _ = m.recordFailure(*state.Config, setupapi.PhasePocketID, errors.New(message))
-		return errors.New(message)
+		_, _ = m.recordFailure(*state.Config, setupapi.PhaseIdentity, failure)
+		return failure
 	}
 	if _, err := m.Command(ctx, "systemctl", "stop", "homestack-setup.service"); err != nil {
-		return rollback(fmt.Errorf("停止 Setup 服务失败: %w", err), nil, nil)
+		return rollback(fmt.Errorf("停止 Setup 服务失败: %w", err))
+	}
+	if _, err := m.Command(ctx, "systemctl", "enable", "homestack-control.service"); err != nil {
+		return rollback(fmt.Errorf("启用 Control 失败: %w", err))
 	}
 	if _, err := m.Command(ctx, "systemctl", "restart", "homestack-control.service"); err != nil {
-		return rollback(fmt.Errorf("启动 Control 失败: %w", err), nil, nil)
+		return rollback(fmt.Errorf("启动 Control 失败: %w", err))
 	}
-	if err := m.waitForURL(ctx, "http://127.0.0.1:8443/api/v1/health", 30*time.Second); err != nil {
-		return rollback(fmt.Errorf("Control 健康检查失败: %w", err), nil, nil)
+	if err := m.waitForHealth(ctx); err != nil {
+		return rollback(err)
 	}
-	envBackup, err := os.ReadFile("/etc/pocket-id/pocket-id.env")
-	if err != nil {
-		return rollback(fmt.Errorf("备份 Pocket ID 环境失败: %w", err), nil, nil)
-	}
-	keyBackup, err := os.ReadFile("/etc/pocket-id/static-api-key")
-	if err != nil {
-		return rollback(fmt.Errorf("备份 Pocket ID API Key 失败: %w", err), nil, nil)
-	}
-	rollbackCompleted := func(failure error) error {
-		if removeErr := os.Remove(m.CompletedPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-			failure = fmt.Errorf("%v；撤销 Setup 完成标记失败: %w", failure, removeErr)
-		}
-		return rollback(failure, envBackup, keyBackup)
-	}
-	if err := removeStaticAPIKey("/etc/pocket-id/pocket-id.env", "/etc/pocket-id/static-api-key"); err != nil {
-		return rollback(err, envBackup, keyBackup)
-	}
-	if err := chownFiles("pocket-id", "/etc/pocket-id/pocket-id.env"); err != nil {
-		return rollback(fmt.Errorf("设置 Pocket ID 环境权限失败: %w", err), envBackup, keyBackup)
-	}
-	if _, err := m.Command(ctx, "systemctl", "restart", "pocket-id.service"); err != nil {
-		return rollback(fmt.Errorf("关闭 Pocket ID 临时 API Key 失败: %w", err), envBackup, keyBackup)
-	}
-	if err := m.waitForPocket(ctx); err != nil {
-		return rollback(err, envBackup, keyBackup)
-	}
-	for _, path := range []string{"/etc/homestack/setup-token.sha256", "/etc/homestack/setup-session.json"} {
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return rollback(fmt.Errorf("删除 Setup 凭据 %s 失败: %w", path, err), envBackup, keyBackup)
-		}
-	}
-	completed := persistedState{Phase: setupapi.PhaseCompleted, Config: state.Config, UpdatedAt: m.Now().UTC()}
+	completed := persistedState{Phase: setupapi.PhaseCompleted, UpdatedAt: m.Now().UTC()}
 	if err := atomicJSON(m.CompletedPath, completed, 0o600); err != nil {
-		return rollback(fmt.Errorf("写入 Setup 完成标记失败: %w", err), envBackup, keyBackup)
+		return rollback(fmt.Errorf("写入 Setup 完成标记失败: %w", err))
 	}
 	if err := m.writeState(completed); err != nil {
-		return rollbackCompleted(fmt.Errorf("写入 Setup 完成状态失败: %w", err))
+		_ = os.Remove(m.CompletedPath)
+		return rollback(fmt.Errorf("写入 Setup 完成状态失败: %w", err))
 	}
-	if _, err := m.Command(ctx, "systemctl", "enable", "homestack-maintenance-helper.service"); err != nil {
-		return rollbackCompleted(fmt.Errorf("启用维护 Helper 失败: %w", err))
+	for _, path := range []string{m.TokenPath, m.SessionPath, m.BackupPath} {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("删除 Setup 临时文件 %s 失败: %w", path, err)
+		}
 	}
-	if _, err := m.Command(ctx, "systemctl", "restart", "homestack-maintenance-helper.service"); err != nil {
-		return rollbackCompleted(fmt.Errorf("启动维护 Helper 失败: %w", err))
-	}
-	if _, err := m.Command(ctx, "systemctl", "disable", "homestack-setup.service", "homestack-setup-helper.service"); err != nil {
-		return rollbackCompleted(fmt.Errorf("锁定 Setup 服务失败: %w", err))
-	}
-	if err := os.Remove(m.FinalizeBackupPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return rollbackCompleted(fmt.Errorf("删除 Finalize 回滚快照失败: %w", err))
+	if _, err := m.Command(ctx, "systemctl", "disable", "homestack-setup.service"); err != nil {
+		return fmt.Errorf("永久锁定 Setup 失败: %w", err)
 	}
 	return nil
 }
 
-func (m *Manager) ensureFinalizeBackup() error {
-	if _, err := os.Stat(m.FinalizeBackupPath); err == nil {
-		return nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("检查 Finalize 回滚快照失败: %w", err)
+func (m *Manager) readControlEnvironment() (setupapi.Configuration, error) {
+	data, err := os.ReadFile(m.ControlEnv)
+	if err != nil {
+		return setupapi.Configuration{}, err
 	}
-	backup := finalizeBackup{}
-	items := []struct {
-		path   string
-		target *fileBackup
-	}{
-		{"/etc/homestack/control.env", &backup.ControlEnv},
-		{"/etc/headscale/config.yaml", &backup.HeadscaleConfig},
-		{"/etc/headscale/policy.hujson", &backup.HeadscalePolicy},
-		{"/etc/headscale/oidc-client-secret", &backup.HeadscaleSecret},
-		{"/etc/homestack/setup-token.sha256", &backup.SetupToken},
-		{"/etc/homestack/setup-session.json", &backup.SetupSession},
-	}
-	for _, item := range items {
-		data, err := os.ReadFile(item.path)
-		if errors.Is(err, os.ErrNotExist) {
+	values := map[string]string{}
+	for _, line := range strings.Split(string(data), "\n") {
+		if line == "" {
 			continue
 		}
-		if err != nil {
-			return fmt.Errorf("备份 %s 失败: %w", item.path, err)
+		name, value, ok := strings.Cut(line, "=")
+		if !ok {
+			return setupapi.Configuration{}, errors.New("Control 环境文件格式无效")
 		}
-		item.target.Exists = true
-		item.target.Data = data
+		values[name] = value
 	}
-	if err := atomicJSON(m.FinalizeBackupPath, backup, 0o600); err != nil {
-		return fmt.Errorf("保存 Finalize 回滚快照失败: %w", err)
+	publicURL := strings.TrimPrefix(values["HOMESTACK_PUBLIC_URL"], "https://")
+	config := setupapi.Configuration{PublicHost: publicURL, Provider: values["HOMESTACK_OAUTH_PROVIDER"], ClientID: values["HOMESTACK_OAUTH_CLIENT_ID"], ClientSecret: values["HOMESTACK_OAUTH_CLIENT_SECRET"]}
+	if err := setupapi.ValidateConfiguration(config); err != nil {
+		return setupapi.Configuration{}, fmt.Errorf("读取当前 Control 配置失败: %w", err)
 	}
-	return nil
+	return config, nil
 }
 
-func (m *Manager) restoreFinalizeBackup() error {
-	data, err := os.ReadFile(m.FinalizeBackupPath)
-	if err != nil {
-		return fmt.Errorf("读取 Finalize 回滚快照失败: %w", err)
+func controlEnvironment(config setupapi.Configuration) []byte {
+	prefix := "HOMESTACK_CONTROL_TRANSPORT=reverse-proxy\n" +
+		"HOMESTACK_CONTROL_ADDR=127.0.0.1:18443\n" +
+		"HOMESTACK_PUBLIC_URL=https://" + config.PublicHost + "\n" +
+		"HOMESTACK_STATE_DIR=/var/lib/homestack-control\n" +
+		"HOMESTACK_SIGNING_KEY=/etc/homestack/control-signing.key\n" +
+		"HOMESTACK_SIGNING_KEY_ID=homestack-control\n"
+	return []byte(prefix + "HOMESTACK_OAUTH_PROVIDER=" + config.Provider + "\n" +
+		"HOMESTACK_OAUTH_CLIENT_ID=" + config.ClientID + "\n" +
+		"HOMESTACK_OAUTH_CLIENT_SECRET=" + config.ClientSecret + "\n")
+}
+
+func samePublicConfig(current *setupapi.PublicConfiguration, target setupapi.Configuration) bool {
+	return current != nil && current.PublicHost == target.PublicHost && current.Provider == target.Provider && current.ClientID == target.ClientID
+}
+
+func statusFromState(state persistedState) setupapi.Status {
+	status := setupapi.Status{Phase: state.Phase, Error: state.Error, UpdatedAt: state.UpdatedAt}
+	if state.Config != nil {
+		status.Config = &setupapi.PublicConfiguration{PublicHost: state.Config.PublicHost, Provider: state.Config.Provider, ClientID: state.Config.ClientID}
 	}
-	var backup finalizeBackup
+	return status
+}
+
+func (m *Manager) recordFailure(config setupapi.Configuration, phase setupapi.Phase, failure error) (setupapi.Status, error) {
+	state := persistedState{Phase: phase, Config: &config, Error: failure.Error(), UpdatedAt: m.Now().UTC()}
+	if err := m.writeState(state); err != nil {
+		return statusFromState(state), fmt.Errorf("%v；记录 Setup 失败状态失败: %w", failure, err)
+	}
+	return statusFromState(state), failure
+}
+
+func (m *Manager) rollbackPrepare(config setupapi.Configuration, failure error) (setupapi.Status, error) {
+	if err := m.restoreBackup(); err != nil {
+		failure = fmt.Errorf("%v；恢复原 Control 配置失败: %w", failure, err)
+	}
+	return m.recordFailure(config, setupapi.PhaseDomain, failure)
+}
+
+func (m *Manager) ensureBackup() error {
+	if _, err := os.Stat(m.BackupPath); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	backup := fileBackup{}
+	data, err := os.ReadFile(m.ControlEnv)
+	if err == nil {
+		backup.Exists, backup.Data = true, data
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("备份 Control 配置失败: %w", err)
+	}
+	return atomicJSON(m.BackupPath, backup, 0o600)
+}
+
+func (m *Manager) restoreBackup() error {
+	data, err := os.ReadFile(m.BackupPath)
+	if err != nil {
+		return fmt.Errorf("读取 Control 配置备份失败: %w", err)
+	}
+	var backup fileBackup
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&backup); err != nil {
-		return fmt.Errorf("解析 Finalize 回滚快照失败: %w", err)
+		return fmt.Errorf("解析 Control 配置备份失败: %w", err)
 	}
-	items := []struct {
-		path    string
-		backup  fileBackup
-		mode    os.FileMode
-		account string
-	}{
-		{"/etc/homestack/control.env", backup.ControlEnv, 0o600, "homestack-control"},
-		{"/etc/headscale/config.yaml", backup.HeadscaleConfig, 0o640, "headscale"},
-		{"/etc/headscale/policy.hujson", backup.HeadscalePolicy, 0o640, "headscale"},
-		{"/etc/headscale/oidc-client-secret", backup.HeadscaleSecret, 0o640, "headscale"},
-		{"/etc/homestack/setup-token.sha256", backup.SetupToken, 0o400, "homestack-control"},
-		{"/etc/homestack/setup-session.json", backup.SetupSession, 0o600, "homestack-control"},
-	}
-	var failures []string
-	for _, item := range items {
-		if !item.backup.Exists {
-			if err := os.Remove(item.path); err != nil && !errors.Is(err, os.ErrNotExist) {
-				failures = append(failures, fmt.Sprintf("删除新增配置 %s 失败: %v", item.path, err))
-			}
-			continue
+	if !backup.Exists {
+		if err := os.Remove(m.ControlEnv); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
 		}
-		if err := atomicWrite(item.path, item.backup.Data, item.mode); err != nil {
-			failures = append(failures, fmt.Sprintf("恢复 %s 失败: %v", item.path, err))
-			continue
-		}
-		if err := chownFiles(item.account, item.path); err != nil {
-			failures = append(failures, fmt.Sprintf("恢复 %s 权限失败: %v", item.path, err))
-		}
-	}
-	if len(failures) > 0 {
-		return errors.New(strings.Join(failures, "；"))
-	}
-	return nil
-}
-
-func (m *Manager) installAsset(ctx context.Context, item asset) error {
-	if data, err := m.Command(ctx, item.Target, item.VersionArgs...); err == nil && strings.Contains(string(data), item.Version) {
 		return nil
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, item.URL, nil)
-	if err != nil {
+	if err := atomicWrite(m.ControlEnv, backup.Data, 0o600); err != nil {
 		return err
 	}
-	response, err := m.HTTPClient.Do(request)
-	if err != nil {
-		return fmt.Errorf("下载 %s %s 失败: %w", item.Component, item.Version, err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("下载 %s %s 失败: HTTP %d", item.Component, item.Version, response.StatusCode)
-	}
-	directory := filepath.Dir(item.Target)
-	if err := os.MkdirAll(directory, 0o755); err != nil {
-		return err
-	}
-	temporary, err := os.CreateTemp(directory, ".homestack-component-*")
-	if err != nil {
-		return err
-	}
-	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
-	hash := sha256.New()
-	if _, err := io.Copy(io.MultiWriter(temporary, hash), io.LimitReader(response.Body, 256<<20)); err != nil {
-		_ = temporary.Close()
-		return fmt.Errorf("写入 %s 下载文件失败: %w", item.Component, err)
-	}
-	if err := temporary.Sync(); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	actual := hex.EncodeToString(hash.Sum(nil))
-	if actual != item.SHA256 {
-		return fmt.Errorf("%s SHA-256 不匹配: %s", item.Component, actual)
-	}
-	if err := os.Chmod(temporaryPath, 0o755); err != nil {
-		return err
-	}
-	output, err := m.Command(ctx, temporaryPath, item.VersionArgs...)
-	if err != nil || !strings.Contains(string(output), item.Version) {
-		return fmt.Errorf("%s 版本校验失败: %w: %s", item.Component, err, strings.TrimSpace(string(output)))
-	}
-	if err := os.Rename(temporaryPath, item.Target); err != nil {
-		return fmt.Errorf("安装 %s 失败: %w", item.Component, err)
-	}
-	return nil
-}
-
-func (m *Manager) ensureSystemAccounts(ctx context.Context) error {
-	_ = ctx
-	for _, account := range []string{"pocket-id", "headscale", "homestack-control"} {
-		if _, err := user.Lookup(account); err != nil {
-			return fmt.Errorf("安装器未创建系统用户 %s: %w", account, err)
-		}
-	}
-	return nil
-}
-
-func (m *Manager) preparePocketID(config setupapi.Configuration) error {
-	for _, directory := range []string{"/etc/pocket-id", "/var/lib/pocket-id", "/var/lib/pocket-id/uploads", "/etc/headscale", "/var/lib/headscale", "/etc/homestack", "/var/lib/homestack-setup"} {
-		if err := os.MkdirAll(directory, 0o750); err != nil {
-			return fmt.Errorf("创建目录 %s 失败: %w", directory, err)
-		}
-	}
-	if err := chownFiles("pocket-id", "/etc/pocket-id", "/var/lib/pocket-id", "/var/lib/pocket-id/uploads"); err != nil {
-		return err
-	}
-	if err := chownFiles("headscale", "/etc/headscale", "/var/lib/headscale"); err != nil {
-		return err
-	}
-	if err := ensureRandomFile("/etc/pocket-id/encryption-key", 32, 0o600, m.Random); err != nil {
-		return err
-	}
-	if err := ensureRandomFile("/etc/pocket-id/static-api-key", 32, 0o600, m.Random); err != nil {
-		return err
-	}
-	if err := chownFiles("pocket-id", "/etc/pocket-id/encryption-key", "/etc/pocket-id/static-api-key"); err != nil {
-		return err
-	}
-	env := strings.Join([]string{
-		"APP_ENV=production", "APP_URL=https://" + config.PocketHost, "INTERNAL_APP_URL=http://127.0.0.1:8444",
-		"HOST=127.0.0.1", "PORT=8444", "ACTORS_HOST=127.0.0.1", "ACTORS_PORT=1414",
-		"ENCRYPTION_KEY_FILE=/etc/pocket-id/encryption-key", "STATIC_API_KEY_FILE=/etc/pocket-id/static-api-key",
-		"TRUST_PROXY=127.0.0.1/32,::1/128", "ALLOW_INSECURE_CALLBACK_URLS=false", "VERSION_CHECK_DISABLED=true", "ANALYTICS_DISABLED=true",
-		"DB_CONNECTION_STRING=/var/lib/pocket-id/pocket-id.db", "UPLOAD_PATH=/var/lib/pocket-id/uploads", "LOG_LEVEL=info", "LOG_JSON=true", "",
-	}, "\n")
-	if err := atomicWrite("/etc/pocket-id/pocket-id.env", []byte(env), 0o600); err != nil {
-		return err
-	}
-	return chownFiles("pocket-id", "/etc/pocket-id/pocket-id.env")
-}
-
-func (m *Manager) writeFinalConfiguration(config setupapi.Configuration, controlSecret, headscaleSecret string) error {
-	headscaleTemplate, err := os.ReadFile(filepath.Join(m.TemplateRoot, "headscale/config.yaml"))
-	if err != nil {
-		return fmt.Errorf("读取 Headscale 模板失败: %w", err)
-	}
-	headscale := strings.NewReplacer(
-		"mesh.example.com", config.MeshHost, "id.example.com", config.PocketHost, "tail.example.com", config.TailHost,
-		"REPLACE_WITH_VPS_IPV4", config.PublicIPv4, "REPLACE_WITH_HEADSCALE_OIDC_CLIENT_ID", "homestack-headscale",
-	).Replace(string(headscaleTemplate))
-	if strings.Contains(headscale, "REPLACE_WITH_") || strings.Contains(headscale, "example.com") {
-		return errors.New("Headscale 模板仍包含占位符")
-	}
-	if err := atomicWrite("/etc/headscale/config.yaml", []byte(headscale), 0o640); err != nil {
-		return err
-	}
-	policy, err := os.ReadFile(filepath.Join(m.TemplateRoot, "headscale/policy.hujson"))
-	if err != nil {
-		return err
-	}
-	if err := atomicWrite("/etc/headscale/policy.hujson", policy, 0o640); err != nil {
-		return err
-	}
-	if err := atomicWrite("/etc/headscale/oidc-client-secret", []byte(headscaleSecret+"\n"), 0o640); err != nil {
-		return err
-	}
-	if err := chownFiles("headscale", "/etc/headscale/config.yaml", "/etc/headscale/policy.hujson", "/etc/headscale/oidc-client-secret"); err != nil {
-		return err
-	}
-	controlEnv := strings.Join([]string{
-		"HOMESTACK_CONTROL_TRANSPORT=reverse-proxy", "HOMESTACK_CONTROL_ADDR=127.0.0.1:8443", "HOMESTACK_PUBLIC_URL=https://" + config.ControlHost,
-		"HOMESTACK_HEADSCALE_URL=https://" + config.MeshHost, "HOMESTACK_POCKET_ID_ISSUER=https://" + config.PocketHost,
-		"HOMESTACK_POCKET_ID_CLIENT_ID=homestack-control", "HOMESTACK_POCKET_ID_CLIENT_SECRET=" + controlSecret,
-		"HOMESTACK_GOOGLE_CLIENT_ID=", "HOMESTACK_GOOGLE_CLIENT_SECRET=", "HOMESTACK_GITHUB_CLIENT_ID=", "HOMESTACK_GITHUB_CLIENT_SECRET=",
-		"HOMESTACK_STATE_DIR=/var/lib/homestack-control", "HOMESTACK_HEADSCALE_CONFIG=/etc/headscale/config.yaml",
-		"HOMESTACK_TLS_CERT=", "HOMESTACK_TLS_KEY=", "HOMESTACK_SIGNING_KEY=/etc/homestack/signing-private.key", "HOMESTACK_SIGNING_KEY_ID=homestack-control-2026-01", "",
-	}, "\n")
-	if err := atomicWrite("/etc/homestack/control.env", []byte(controlEnv), 0o600); err != nil {
-		return err
-	}
-	return chownFiles("homestack-control", "/etc/homestack/control.env")
-}
-
-func (m *Manager) installUnits(names ...string) error {
-	for _, name := range names {
-		data, err := os.ReadFile(filepath.Join(m.TemplateRoot, "systemd", name))
-		if err != nil {
-			return fmt.Errorf("读取 systemd 模板 %s 失败: %w", name, err)
-		}
-		if err := atomicWrite(filepath.Join("/etc/systemd/system", name), data, 0o644); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (m *Manager) waitForPocket(ctx context.Context) error {
-	return m.waitForURL(ctx, "http://127.0.0.1:8444/healthz", 30*time.Second)
-}
-
-func (m *Manager) waitForURL(ctx context.Context, target string, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		request, _ := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
-		response, err := m.HTTPClient.Do(request)
-		if err == nil {
-			_ = response.Body.Close()
-			if response.StatusCode == http.StatusOK {
-				return nil
-			}
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(500 * time.Millisecond):
-		}
-	}
-	return fmt.Errorf("%s 未在 %s 内通过健康检查", target, timeout)
+	return m.Chown("homestack-control", m.ControlEnv)
 }
 
 func (m *Manager) readState() (persistedState, error) {
@@ -641,20 +364,28 @@ func (m *Manager) writeState(state persistedState) error {
 	return atomicJSON(m.StatePath, state, 0o600)
 }
 
-func (m *Manager) recordFailure(config setupapi.Configuration, phase setupapi.Phase, failure error) (setupapi.Status, error) {
-	state := persistedState{Phase: phase, Config: &config, Error: failure.Error(), UpdatedAt: m.Now().UTC()}
-	if err := m.writeState(state); err != nil {
-		return statusFromState(state), fmt.Errorf("%v；并且写入失败状态失败: %w", failure, err)
+func (m *Manager) waitForHealth(ctx context.Context) error {
+	client := m.HTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: 2 * time.Second}
 	}
-	return statusFromState(state), failure
-}
-
-func statusFromState(state persistedState) setupapi.Status {
-	status := setupapi.Status{Phase: state.Phase, Config: state.Config, Error: state.Error, UpdatedAt: state.UpdatedAt}
-	if state.Config != nil {
-		status.PocketURL = "https://" + state.Config.PocketHost + "/setup"
+	deadline := m.Now().Add(30 * time.Second)
+	for m.Now().Before(deadline) {
+		request, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://127.0.0.1:18443/api/health", nil)
+		response, err := client.Do(request)
+		if err == nil {
+			_ = response.Body.Close()
+			if response.StatusCode == http.StatusOK {
+				return nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
 	}
-	return status
+	return errors.New("Control 健康检查超时")
 }
 
 func atomicJSON(path string, value any, mode os.FileMode) error {
@@ -666,67 +397,43 @@ func atomicJSON(path string, value any, mode os.FileMode) error {
 }
 
 func atomicWrite(path string, data []byte, mode os.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	temporary, err := os.CreateTemp(filepath.Dir(path), ".homestack-write-*")
+	file, err := os.CreateTemp(filepath.Dir(path), ".homestack-*")
 	if err != nil {
 		return err
 	}
-	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
-	if err := temporary.Chmod(mode); err != nil {
-		_ = temporary.Close()
+	temporary := file.Name()
+	defer os.Remove(temporary)
+	if err := file.Chmod(mode); err != nil {
+		_ = file.Close()
 		return err
 	}
-	if _, err := temporary.Write(data); err != nil {
-		_ = temporary.Close()
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
 		return err
 	}
-	if err := temporary.Sync(); err != nil {
-		_ = temporary.Close()
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
 		return err
 	}
-	if err := temporary.Close(); err != nil {
+	if err := file.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(temporaryPath, path); err != nil {
-		return err
-	}
-	return nil
-}
-
-func ensureRandomFile(path string, size int, mode os.FileMode, reader io.Reader) error {
-	if _, err := os.Stat(path); err == nil {
-		return nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	data := make([]byte, size)
-	if _, err := io.ReadFull(reader, data); err != nil {
-		return err
-	}
-	return atomicWrite(path, []byte(base64.RawURLEncoding.EncodeToString(data)+"\n"), mode)
-}
-
-func randomSecret(reader io.Reader) (string, error) {
-	data := make([]byte, 32)
-	if _, err := io.ReadFull(reader, data); err != nil {
-		return "", err
-	}
-	return base64.RawURLEncoding.EncodeToString(data), nil
+	return os.Rename(temporary, path)
 }
 
 func chownFiles(account string, paths ...string) error {
-	entry, err := user.Lookup(account)
+	userAccount, err := user.Lookup(account)
 	if err != nil {
 		return err
 	}
-	uid, err := strconv.Atoi(entry.Uid)
+	uid, err := strconv.Atoi(userAccount.Uid)
 	if err != nil {
 		return err
 	}
-	gid, err := strconv.Atoi(entry.Gid)
+	gid, err := strconv.Atoi(userAccount.Gid)
 	if err != nil {
 		return err
 	}
@@ -738,70 +445,35 @@ func chownFiles(account string, paths ...string) error {
 	return nil
 }
 
-func removeStaticAPIKey(envPath, keyPath string) error {
-	data, err := os.ReadFile(envPath)
-	if err != nil {
-		return err
-	}
-	lines := strings.Split(string(data), "\n")
-	filtered := lines[:0]
-	for _, line := range lines {
-		if !strings.HasPrefix(line, "STATIC_API_KEY") {
-			filtered = append(filtered, line)
-		}
-	}
-	if err := atomicWrite(envPath, []byte(strings.Join(filtered, "\n")), 0o600); err != nil {
-		return err
-	}
-	if err := os.Remove(keyPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("删除 Pocket ID 临时 API Key 失败: %w", err)
-	}
-	return nil
-}
-
 func runWhitelistedCommand(ctx context.Context, name string, arguments ...string) ([]byte, error) {
-	if !allowedCommand(name, arguments) {
-		return nil, fmt.Errorf("命令不在 Setup Helper 白名单中: %s %s", name, strings.Join(arguments, " "))
+	joined := strings.Join(arguments, "\x00")
+	allowed := false
+	if name == "/usr/local/bin/homestack-control" {
+		allowed = joined == "configtest\x00--env-file\x00/etc/homestack/control.env"
+	} else if name == "systemctl" {
+		for _, candidate := range []string{
+			"start\x00--no-block\x00homestack-setup-switch.service",
+			"stop\x00homestack-setup.service", "stop\x00homestack-control.service",
+			"enable\x00homestack-control.service",
+			"restart\x00homestack-control.service", "restart\x00homestack-config-helper.service", "restart\x00homestack-setup.service",
+			"enable\x00homestack-config-helper.service\x00homestack-setup.service",
+			"disable\x00homestack-setup.service",
+		} {
+			if joined == candidate {
+				allowed = true
+				break
+			}
+		}
+	} else if name == "systemd-run" {
+		allowed = joined == "--unit=homestack-control-restart\x00--replace\x00--on-active=2s\x00--property=Type=oneshot\x00systemctl\x00restart\x00homestack-control.service"
 	}
-	output, err := exec.CommandContext(ctx, name, arguments...).CombinedOutput()
+	if !allowed {
+		return nil, fmt.Errorf("命令不在 Config Helper 白名单中: %s %s", name, strings.Join(arguments, " "))
+	}
+	command := exec.CommandContext(ctx, name, arguments...)
+	output, err := command.CombinedOutput()
 	if err != nil {
-		return output, fmt.Errorf("%s: %w: %s", name, err, strings.TrimSpace(string(output)))
+		return nil, fmt.Errorf("%s: %w", strings.TrimSpace(string(output)), err)
 	}
 	return output, nil
-}
-
-func allowedCommand(name string, arguments []string) bool {
-	joined := strings.Join(arguments, "\x00")
-	if name == "systemctl" {
-		allowed := map[string]bool{
-			"daemon-reload":                                                        true,
-			"enable\x00pocket-id.service":                                          true,
-			"restart\x00pocket-id.service":                                         true,
-			"disable\x00--now\x00pocket-id.service":                                true,
-			"enable\x00headscale.service\x00homestack-control.service":             true,
-			"restart\x00headscale.service":                                         true,
-			"start\x00--no-block\x00homestack-setup-switch.service":                true,
-			"stop\x00homestack-setup.service":                                      true,
-			"restart\x00homestack-control.service":                                 true,
-			"stop\x00homestack-control.service\x00headscale.service":               true,
-			"enable\x00homestack-setup-helper.service\x00homestack-setup.service":  true,
-			"restart\x00homestack-setup-helper.service":                            true,
-			"restart\x00homestack-setup.service":                                   true,
-			"enable\x00homestack-maintenance-helper.service":                       true,
-			"restart\x00homestack-maintenance-helper.service":                      true,
-			"disable\x00--now\x00homestack-maintenance-helper.service":             true,
-			"disable\x00homestack-setup.service\x00homestack-setup-helper.service": true,
-		}
-		return allowed[joined]
-	}
-	if name == "/usr/local/bin/headscale" {
-		return joined == "configtest\x00--config\x00/etc/headscale/config.yaml" || joined == "policy\x00check\x00--config\x00/etc/headscale/config.yaml\x00--bypass" || joined == "version"
-	}
-	if name == "/usr/local/bin/pocket-id" {
-		return joined == "version"
-	}
-	if name == "/usr/local/bin/homestack-control" {
-		return joined == "configtest\x00--env-file\x00/etc/homestack/control.env"
-	}
-	return strings.HasPrefix(filepath.Base(name), ".homestack-component-") && joined == "version"
 }

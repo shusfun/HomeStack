@@ -9,45 +9,6 @@ import (
 	"time"
 )
 
-var fileBrowserReadRoutes = map[string]struct{}{
-	"/api/resources": {},
-	"/api/raw":       {},
-	"/api/preview":   {},
-	"/api/search":    {},
-	"/api/usage":     {},
-}
-
-func NewFileBrowserProxy(rawBaseURL, apiToken string) (http.Handler, error) {
-	target, err := parseLoopbackTarget(rawBaseURL)
-	if err != nil {
-		return nil, err
-	}
-	proxy := httputil.NewSingleHostReverseProxy(target)
-	proxy.FlushInterval = -1
-	originalDirector := proxy.Director
-	proxy.Director = func(request *http.Request) {
-		originalDirector(request)
-		request.Header.Del("Cookie")
-		request.Header.Del("Authorization")
-		request.Header.Set("Authorization", "Bearer "+apiToken)
-	}
-	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.Method != http.MethodGet && request.Method != http.MethodHead {
-			writeAgentError(writer, http.StatusMethodNotAllowed, "read_only", "FileBrowser 仅允许读取和下载")
-			return
-		}
-		if _, ok := fileBrowserReadRoutes[request.URL.Path]; !ok {
-			writeAgentError(writer, http.StatusForbidden, "route_denied", "FileBrowser API 不在只读白名单中")
-			return
-		}
-		if err := validateRequestPaths(request.URL); err != nil {
-			writeAgentError(writer, http.StatusBadRequest, "invalid_path", err.Error())
-			return
-		}
-		proxy.ServeHTTP(writer, request)
-	}), nil
-}
-
 func NewJellyfinProxy(rawBaseURL, apiKey string) (http.Handler, error) {
 	target, err := parseLoopbackTarget(rawBaseURL)
 	if err != nil {

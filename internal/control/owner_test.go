@@ -9,13 +9,13 @@ import (
 	"time"
 )
 
-func TestOwnerStoreClaimsFirstIdentityAndRequiresExplicitLink(t *testing.T) {
+func TestOwnerStoreClaimsFirstIdentityAndReplacesProviderExplicitly(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "owner.json")
 	store, err := OpenOwnerStore(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	first := ExternalIdentity{Provider: "pocket", Subject: "owner-1", Email: "owner@example.com", Name: "Owner", EmailVerified: true}
+	first := ExternalIdentity{Provider: "github", Subject: "owner-1", Email: "owner@example.com", Name: "Owner", EmailVerified: true}
 	identity, err := store.AuthenticateOrClaim(first)
 	if err != nil || identity.Subject == "" {
 		t.Fatalf("首个身份认领失败: identity=%+v err=%v", identity, err)
@@ -24,12 +24,19 @@ func TestOwnerStoreClaimsFirstIdentityAndRequiresExplicitLink(t *testing.T) {
 	if _, err := store.AuthenticateOrClaim(sameEmail); !errors.Is(err, ErrIdentityNotLinked) {
 		t.Fatalf("同邮箱未绑定身份必须被拒绝，实际错误: %v", err)
 	}
-	if err := store.Link(identity.Subject, sameEmail); err != nil {
+	previous, err := store.ReplaceIdentity(identity.Subject, sameEmail)
+	if err != nil {
 		t.Fatal(err)
 	}
 	linked, err := store.AuthenticateOrClaim(sameEmail)
 	if err != nil || linked.Subject != identity.Subject {
-		t.Fatalf("显式绑定后登录失败: identity=%+v err=%v", linked, err)
+		t.Fatalf("显式替换后登录失败: identity=%+v err=%v", linked, err)
+	}
+	if err := store.RestoreOwner(previous); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AuthenticateOrClaim(first); err != nil {
+		t.Fatalf("恢复旧身份失败: %v", err)
 	}
 }
 

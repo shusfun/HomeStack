@@ -2,67 +2,44 @@ package protocol
 
 import "time"
 
-const (
-	JoinVersion         = "homestack.join.v1"
-	DeviceConfigVersion = "homestack.device-config.v1"
-	DeviceStatusVersion = "homestack.device-status.v1"
-	AccessTicketVersion = "homestack.access-ticket.v1"
-)
-
-type JoinDescriptorV1 struct {
-	Version string `json:"version"`
-	Server  string `json:"server"`
-	Code    string `json:"code"`
+type NodeRegistration struct {
+	Name                string            `json:"name"`
+	Platform            string            `json:"platform"`
+	Architecture        string            `json:"architecture"`
+	TailscaleIP         string            `json:"tailscale_ip"`
+	MagicDNS            string            `json:"magic_dns"`
+	DevicePublicKey     string            `json:"device_public_key"`
+	EncryptionPublicKey string            `json:"encryption_public_key"`
+	SharedDirectories   []SharedDirectory `json:"shared_directories,omitempty"`
 }
 
-type JoinRequestV1 struct {
-	Version             string `json:"version"`
-	Code                string `json:"code"`
-	DeviceName          string `json:"device_name"`
-	AgentURL            string `json:"agent_url"`
-	EncryptionPublicKey string `json:"encryption_public_key"`
+type RegistrationResponse struct {
+	DeviceID         string         `json:"device_id"`
+	DeviceName       string         `json:"device_name"`
+	SealedCredential SealedEnvelope `json:"sealed_credential"`
+	SignedConfig     string         `json:"signed_config"`
 }
 
-type JoinResponseV1 struct {
-	Version          string           `json:"version"`
-	DeviceID         string           `json:"device_id"`
-	DeviceName       string           `json:"device_name"`
-	SealedCredential SealedEnvelopeV1 `json:"sealed_credential"`
-	SignedConfig     string           `json:"signed_config"`
-}
-
-type SealedEnvelopeV1 struct {
-	Version            string `json:"version"`
+type SealedEnvelope struct {
 	EphemeralPublicKey string `json:"ephemeral_public_key"`
 	Nonce              string `json:"nonce"`
 	Ciphertext         string `json:"ciphertext"`
 }
 
-type DeviceCredentialV1 struct {
-	Version              string                       `json:"version"`
-	DeviceID             string                       `json:"device_id"`
-	DeviceToken          string                       `json:"device_token"`
-	HeadscaleLoginServer string                       `json:"headscale_login_server"`
-	HeadscaleAuthKey     string                       `json:"headscale_auth_key"`
-	ModuleSecrets        map[string]map[string]string `json:"module_secrets,omitempty"`
-	ExpiresAt            time.Time                    `json:"expires_at"`
+type DeviceCredential struct {
+	DeviceID      string                       `json:"device_id"`
+	DeviceToken   string                       `json:"device_token"`
+	ModuleSecrets map[string]map[string]string `json:"module_secrets,omitempty"`
+	ExpiresAt     time.Time                    `json:"expires_at"`
 }
 
-type JoinPolicyV1 struct {
-	DeviceName        string                       `json:"device_name"`
-	AgentURL          string                       `json:"agent_url"`
-	Modules           []ModuleConfigV1             `json:"modules"`
-	SharedDirectories []SharedDirectoryV1          `json:"shared_directories"`
-	ModuleSecrets     map[string]map[string]string `json:"module_secrets,omitempty"`
+type SharedDirectory struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Path string `json:"path"`
 }
 
-type SharedDirectoryV1 struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Permissions []string `json:"permissions"`
-}
-
-type ModuleConfigV1 struct {
+type ModuleConfig struct {
 	ID         string `json:"id"`
 	InstanceID string `json:"instance_id,omitempty"`
 	Enabled    bool   `json:"enabled"`
@@ -71,20 +48,19 @@ type ModuleConfigV1 struct {
 	ReadOnly   bool   `json:"read_only"`
 }
 
-type SignedDeviceConfigV1 struct {
-	Version           string              `json:"version"`
-	DeviceID          string              `json:"device_id"`
-	DeviceName        string              `json:"device_name"`
-	Revision          uint64              `json:"revision"`
-	IssuedAt          time.Time           `json:"issued_at"`
-	ExpiresAt         time.Time           `json:"expires_at"`
-	ControlURL        string              `json:"control_url"`
-	AgentURL          string              `json:"agent_url"`
-	Modules           []ModuleConfigV1    `json:"modules"`
-	SharedDirectories []SharedDirectoryV1 `json:"shared_directories"`
+type SignedDeviceConfig struct {
+	DeviceID          string            `json:"device_id"`
+	DeviceName        string            `json:"device_name"`
+	Revision          uint64            `json:"revision"`
+	IssuedAt          time.Time         `json:"issued_at"`
+	ExpiresAt         time.Time         `json:"expires_at"`
+	ControlURL        string            `json:"control_url"`
+	AgentURL          string            `json:"agent_url"`
+	Modules           []ModuleConfig    `json:"modules"`
+	SharedDirectories []SharedDirectory `json:"shared_directories"`
 }
 
-type ModuleStatusV1 struct {
+type ModuleStatus struct {
 	ID              string    `json:"id"`
 	State           string    `json:"state"`
 	Version         string    `json:"version,omitempty"`
@@ -93,21 +69,18 @@ type ModuleStatusV1 struct {
 	CheckedAt       time.Time `json:"checked_at"`
 }
 
-type DeviceStatusV1 struct {
-	Version        string           `json:"version"`
-	DeviceID       string           `json:"device_id"`
-	Name           string           `json:"name"`
-	Online         bool             `json:"online"`
-	TailnetIP      string           `json:"tailnet_ip,omitempty"`
-	Connection     string           `json:"connection"`
-	DERPRegion     string           `json:"derp_region,omitempty"`
-	LastSeen       time.Time        `json:"last_seen"`
-	ConfigRevision uint64           `json:"config_revision"`
-	Modules        []ModuleStatusV1 `json:"modules"`
+type DeviceStatus struct {
+	DeviceID       string         `json:"device_id"`
+	Name           string         `json:"name"`
+	Online         bool           `json:"online"`
+	TailscaleIP    string         `json:"tailscale_ip,omitempty"`
+	Connection     string         `json:"connection"`
+	LastSeen       time.Time      `json:"last_seen"`
+	ConfigRevision uint64         `json:"config_revision"`
+	Modules        []ModuleStatus `json:"modules"`
 }
 
-type AccessTicketClaimsV1 struct {
-	Version   string    `json:"version"`
+type AccessTicketClaims struct {
 	Issuer    string    `json:"iss"`
 	Subject   string    `json:"sub"`
 	DeviceID  string    `json:"device_id"`

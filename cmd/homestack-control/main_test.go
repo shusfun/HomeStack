@@ -17,14 +17,14 @@ func TestLoadSettingsRequiresExplicitTransport(t *testing.T) {
 func TestReverseProxyTransportRequiresLoopbackAndNoTLS(t *testing.T) {
 	setRequiredSettings(t)
 	t.Setenv("HOMESTACK_CONTROL_TRANSPORT", "reverse-proxy")
-	t.Setenv("HOMESTACK_CONTROL_ADDR", "127.0.0.1:8443")
+	t.Setenv("HOMESTACK_CONTROL_ADDR", "127.0.0.1:18443")
 	t.Setenv("HOMESTACK_TLS_CERT", "")
 	t.Setenv("HOMESTACK_TLS_KEY", "")
 	settings, err := loadSettings()
 	if err != nil || settings.transport != "reverse-proxy" {
 		t.Fatalf("合法反代配置失败: %+v %v", settings, err)
 	}
-	t.Setenv("HOMESTACK_CONTROL_ADDR", "0.0.0.0:8443")
+	t.Setenv("HOMESTACK_CONTROL_ADDR", "0.0.0.0:18443")
 	if _, err := loadSettings(); err == nil {
 		t.Fatal("反代模式绑定公网地址必须失败")
 	}
@@ -43,11 +43,11 @@ func TestLoadEnvFileRejectsMalformedLine(t *testing.T) {
 func setRequiredSettings(t *testing.T) {
 	t.Helper()
 	values := map[string]string{
-		"HOMESTACK_CONTROL_TRANSPORT": "tls", "HOMESTACK_CONTROL_ADDR": "0.0.0.0:8443",
-		"HOMESTACK_PUBLIC_URL": "https://app.example.com", "HOMESTACK_HEADSCALE_URL": "https://mesh.example.com",
-		"HOMESTACK_STATE_DIR": "/tmp/state", "HOMESTACK_HEADSCALE_CONFIG": "/tmp/headscale.yaml",
+		"HOMESTACK_CONTROL_TRANSPORT": "reverse-proxy", "HOMESTACK_CONTROL_ADDR": "127.0.0.1:18443",
+		"HOMESTACK_PUBLIC_URL": "https://app.example.com", "HOMESTACK_STATE_DIR": "/tmp/state",
 		"HOMESTACK_SIGNING_KEY": "/tmp/key", "HOMESTACK_SIGNING_KEY_ID": "control-test",
-		"HOMESTACK_TLS_CERT": "/tmp/cert", "HOMESTACK_TLS_KEY": "/tmp/tls-key",
+		"HOMESTACK_OAUTH_PROVIDER": "github", "HOMESTACK_OAUTH_CLIENT_ID": "client", "HOMESTACK_OAUTH_CLIENT_SECRET": "secret",
+		"HOMESTACK_TLS_CERT": "", "HOMESTACK_TLS_KEY": "",
 	}
 	for name, value := range values {
 		t.Setenv(name, value)

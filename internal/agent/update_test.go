@@ -56,7 +56,7 @@ func TestSemverNewerRejectsDowngrade(t *testing.T) {
 	for _, test := range []struct {
 		candidate, current string
 		want               bool
-	}{{"1.2.4", "1.2.3", true}, {"v2.0.0", "1.9.9", true}, {"1.2.3", "1.2.3", false}, {"1.2.2", "1.2.3", false}, {"1.2.3-beta.2", "1.2.3", false}} {
+	}{{"3.2.4", "3.2.3", true}, {"v3.0.0", "0.9.9", true}, {"3.2.3", "3.2.3", false}, {"3.2.2", "3.2.3", false}, {"3.2.3-beta.2", "3.2.3", false}} {
 		actual, err := semverNewer(test.candidate, test.current)
 		if err != nil || actual != test.want {
 			t.Errorf("semverNewer(%q, %q)=%v,%v，期望 %v", test.candidate, test.current, actual, err, test.want)
@@ -65,17 +65,17 @@ func TestSemverNewerRejectsDowngrade(t *testing.T) {
 }
 
 func TestValidateAgentVersionOutputRejectsWrongMetadata(t *testing.T) {
-	valid := []byte(`{"name":"homestack-agent","version":"1.2.3","goos":"linux","goarch":"arm64"}`)
-	if err := validateAgentVersionOutput(valid, "v1.2.3", "linux", "arm64"); err != nil {
+	valid := []byte(`{"name":"homestack-agent","version":"3.2.3","goos":"linux","goarch":"arm64"}`)
+	if err := validateAgentVersionOutput(valid, "v3.2.3", "linux", "arm64"); err != nil {
 		t.Fatalf("合法版本元数据被拒绝: %v", err)
 	}
 	for _, invalid := range [][]byte{
-		[]byte(`{"name":"other","version":"1.2.3","goos":"linux","goarch":"arm64"}`),
-		[]byte(`{"name":"homestack-agent","version":"1.2.4","goos":"linux","goarch":"arm64"}`),
-		[]byte(`{"name":"homestack-agent","version":"1.2.3","goos":"darwin","goarch":"arm64"}`),
-		[]byte(`{"name":"homestack-agent","version":"1.2.3","goos":"linux","goarch":"amd64"}`),
+		[]byte(`{"name":"other","version":"3.2.3","goos":"linux","goarch":"arm64"}`),
+		[]byte(`{"name":"homestack-agent","version":"3.2.4","goos":"linux","goarch":"arm64"}`),
+		[]byte(`{"name":"homestack-agent","version":"3.2.3","goos":"darwin","goarch":"arm64"}`),
+		[]byte(`{"name":"homestack-agent","version":"3.2.3","goos":"linux","goarch":"amd64"}`),
 	} {
-		if err := validateAgentVersionOutput(invalid, "1.2.3", "linux", "arm64"); err == nil {
+		if err := validateAgentVersionOutput(invalid, "3.2.3", "linux", "arm64"); err == nil {
 			t.Fatalf("错误版本元数据必须被拒绝: %s", invalid)
 		}
 	}

@@ -29,7 +29,7 @@ type ConfigStore struct {
 	publicKey ed25519.PublicKey
 	keyID     string
 	now       func() time.Time
-	current   protocol.SignedDeviceConfigV1
+	current   protocol.SignedDeviceConfig
 	signed    string
 }
 
@@ -62,26 +62,26 @@ func OpenConfigStore(path, deviceID string, publicKey ed25519.PublicKey, keyID s
 	return store, nil
 }
 
-func (s *ConfigStore) Apply(signed string) (protocol.SignedDeviceConfigV1, error) {
+func (s *ConfigStore) Apply(signed string) (protocol.SignedDeviceConfig, error) {
 	config, err := s.verify(signed)
 	if err != nil {
-		return protocol.SignedDeviceConfigV1{}, err
+		return protocol.SignedDeviceConfig{}, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.current.Revision != 0 && config.Revision <= s.current.Revision {
-		return protocol.SignedDeviceConfigV1{}, ErrConfigRollback
+		return protocol.SignedDeviceConfig{}, ErrConfigRollback
 	}
 	previousConfig, previousSigned := s.current, s.signed
 	s.current, s.signed = config, signed
 	if err := s.saveLocked(); err != nil {
 		s.current, s.signed = previousConfig, previousSigned
-		return protocol.SignedDeviceConfigV1{}, err
+		return protocol.SignedDeviceConfig{}, err
 	}
 	return config, nil
 }
 
-func (s *ConfigStore) Current() (protocol.SignedDeviceConfigV1, bool) {
+func (s *ConfigStore) Current() (protocol.SignedDeviceConfig, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.current, s.current.Revision != 0
@@ -93,35 +93,32 @@ func (s *ConfigStore) Signed() string {
 	return s.signed
 }
 
-func (s *ConfigStore) verify(signed string) (protocol.SignedDeviceConfigV1, error) {
+func (s *ConfigStore) verify(signed string) (protocol.SignedDeviceConfig, error) {
 	return s.verifyToken(signed, false)
 }
 
-func (s *ConfigStore) verifyToken(signed string, allowExpired bool) (protocol.SignedDeviceConfigV1, error) {
-	var config protocol.SignedDeviceConfigV1
+func (s *ConfigStore) verifyToken(signed string, allowExpired bool) (protocol.SignedDeviceConfig, error) {
+	var config protocol.SignedDeviceConfig
 	if err := secure.VerifyJWS(signed, s.publicKey, s.keyID, &config); err != nil {
-		return protocol.SignedDeviceConfigV1{}, fmt.Errorf("验证设备配置失败: %w", err)
-	}
-	if config.Version != protocol.DeviceConfigVersion {
-		return protocol.SignedDeviceConfigV1{}, errors.New("设备配置版本不受支持")
+		return protocol.SignedDeviceConfig{}, fmt.Errorf("验证设备配置失败: %w", err)
 	}
 	if config.DeviceID != s.deviceID {
-		return protocol.SignedDeviceConfigV1{}, errors.New("设备配置与当前设备不匹配")
+		return protocol.SignedDeviceConfig{}, errors.New("设备配置与当前设备不匹配")
 	}
 	now := s.now().UTC()
 	if config.IssuedAt.After(now.Add(2 * time.Minute)) {
-		return protocol.SignedDeviceConfigV1{}, errors.New("设备配置签发时间晚于本机时间")
+		return protocol.SignedDeviceConfig{}, errors.New("设备配置签发时间晚于本机时间")
 	}
 	if !allowExpired && !now.Before(config.ExpiresAt) {
-		return protocol.SignedDeviceConfigV1{}, errors.New("设备配置已过期")
+		return protocol.SignedDeviceConfig{}, errors.New("设备配置已过期")
 	}
 	if err := ValidateDeviceConfig(config); err != nil {
-		return protocol.SignedDeviceConfigV1{}, err
+		return protocol.SignedDeviceConfig{}, err
 	}
 	return config, nil
 }
 
-func ValidateDeviceConfig(config protocol.SignedDeviceConfigV1) error {
+func ValidateDeviceConfig(config protocol.SignedDeviceConfig) error {
 	if config.Revision == 0 {
 		return errors.New("设备配置 revision 必须大于零")
 	}
@@ -134,12 +131,12 @@ func ValidateDeviceConfig(config protocol.SignedDeviceConfigV1) error {
 	if err := requireHTTPSURL(config.ControlURL, "Control", ""); err != nil {
 		return err
 	}
-	if err := requireHTTPSURL(config.AgentURL, "Agent", "9443"); err != nil {
+	if err := requireHTTPSURL(config.AgentURL, "Node", "19443"); err != nil {
 		return err
 	}
 	seenModules := map[string]struct{}{}
 	for _, module := range config.Modules {
-		if !slices.Contains([]string{"filebrowser", "jellyfin", "cc-connect"}, module.ID) {
+		if !slices.Contains([]string{"jellyfin", "cc-connect"}, module.ID) {
 			return fmt.Errorf("未知模块 %q", module.ID)
 		}
 		moduleKey := ModuleKey(module)
@@ -151,16 +148,6 @@ func ValidateDeviceConfig(config protocol.SignedDeviceConfigV1) error {
 			continue
 		}
 		switch module.ID {
-		case "filebrowser":
-			if module.InstanceID != "" || module.WorkDir != "" {
-				return errors.New("FileBrowser 模块不允许设置 instance_id 或 work_dir")
-			}
-			if !module.ReadOnly {
-				return errors.New("FileBrowser 模块必须为只读")
-			}
-			if err := requireLoopbackURL(module.BaseURL); err != nil {
-				return fmt.Errorf("FileBrowser 地址无效: %w", err)
-			}
 		case "jellyfin":
 			if module.InstanceID != "" || module.WorkDir != "" {
 				return errors.New("Jellyfin 模块不允许设置 instance_id 或 work_dir")
@@ -184,19 +171,14 @@ func ValidateDeviceConfig(config protocol.SignedDeviceConfigV1) error {
 		}
 	}
 	for _, directory := range config.SharedDirectories {
-		if directory.ID == "" || directory.Name == "" {
-			return errors.New("共享目录必须包含 ID 和名称")
-		}
-		for _, permission := range directory.Permissions {
-			if permission != "read" && permission != "download" {
-				return fmt.Errorf("共享目录包含写权限 %q", permission)
-			}
+		if directory.ID == "" || directory.Name == "" || !filepath.IsAbs(directory.Path) || filepath.Clean(directory.Path) != directory.Path {
+			return errors.New("共享目录必须包含 ID、名称和规范化绝对路径")
 		}
 	}
 	return nil
 }
 
-func ModuleKey(module protocol.ModuleConfigV1) string {
+func ModuleKey(module protocol.ModuleConfig) string {
 	if module.InstanceID != "" {
 		return module.InstanceID
 	}

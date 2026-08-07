@@ -48,10 +48,6 @@ type Authenticator interface {
 	Metadata() []ProviderMetadata
 }
 
-type MaintenanceAuthorizer interface {
-	ConsumeMaintenanceGrant(*http.Request, string) bool
-}
-
 type WebAuthenticator interface {
 	RegisterRoutes(*http.ServeMux)
 }
@@ -109,20 +105,20 @@ type appCode struct {
 }
 
 type AuthManager struct {
-	providers         map[string]*OAuthProvider
-	store             *OwnerStore
-	mu                sync.Mutex
-	pending           map[string]pendingLogin
-	appCodes          map[string]appCode
-	maintenanceGrants map[string]time.Time
-	now               func() time.Time
+	providers    map[string]*OAuthProvider
+	store        *OwnerStore
+	mu           sync.Mutex
+	pending      map[string]pendingLogin
+	appCodes     map[string]appCode
+	reauthGrants map[string]time.Time
+	now          func() time.Time
 }
 
 func NewAuthManager(providers []*OAuthProvider, store *OwnerStore) (*AuthManager, error) {
 	if len(providers) == 0 || store == nil {
 		return nil, errors.New("认证提供商和所有者存储必须配置")
 	}
-	manager := &AuthManager{providers: map[string]*OAuthProvider{}, store: store, pending: map[string]pendingLogin{}, appCodes: map[string]appCode{}, maintenanceGrants: map[string]time.Time{}, now: time.Now}
+	manager := &AuthManager{providers: map[string]*OAuthProvider{}, store: store, pending: map[string]pendingLogin{}, appCodes: map[string]appCode{}, reauthGrants: map[string]time.Time{}, now: time.Now}
 	for _, provider := range providers {
 		if provider == nil || provider.ID == "" || manager.providers[provider.ID] != nil {
 			return nil, errors.New("认证提供商 ID 无效或重复")
@@ -133,7 +129,7 @@ func NewAuthManager(providers []*OAuthProvider, store *OwnerStore) (*AuthManager
 }
 
 func (a *AuthManager) Metadata() []ProviderMetadata {
-	order := []string{"pocket", "google", "github"}
+	order := []string{"google", "github"}
 	result := make([]ProviderMetadata, 0, len(a.providers))
 	for _, id := range order {
 		if provider := a.providers[id]; provider != nil {
@@ -161,29 +157,29 @@ func (a *AuthManager) Authenticate(_ context.Context, request *http.Request) (Id
 func (a *AuthManager) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /auth/login/{provider}", a.startWebLogin)
 	mux.HandleFunc("GET /auth/app/start/{provider}", a.startAppLogin)
-	mux.HandleFunc("GET /auth/link/{provider}", a.startLink)
-	mux.HandleFunc("GET /auth/reauth/{provider}", a.startMaintenanceReauth)
+	mux.HandleFunc("GET /auth/reauth/{provider}", a.startReauth)
 	mux.HandleFunc("GET /auth/callback/{provider}", a.completeLogin)
-	mux.HandleFunc("POST /api/v1/auth/app/token", a.exchangeAppCode)
-	mux.HandleFunc("POST /api/v1/auth/app/refresh", a.refreshAppToken)
+	mux.HandleFunc("POST /api/auth/app/token", a.exchangeAppCode)
+	mux.HandleFunc("POST /api/auth/app/refresh", a.refreshAppToken)
 	mux.HandleFunc("POST /auth/logout", a.logout)
 }
 
-func (a *AuthManager) startMaintenanceReauth(writer http.ResponseWriter, request *http.Request) {
-	if request.PathValue("provider") != "pocket" {
-		http.Error(writer, "域名迁移只允许使用 Pocket ID 重新认证", http.StatusBadRequest)
-		return
-	}
+func (a *AuthManager) startReauth(writer http.ResponseWriter, request *http.Request) {
 	identity, err := a.Authenticate(request.Context(), request)
 	if err != nil {
 		http.Error(writer, err.Error(), http.StatusUnauthorized)
 		return
 	}
+	provider := a.providers[request.PathValue("provider")]
+	if provider == nil || len(a.providers) != 1 {
+		http.Error(writer, "重新认证必须使用当前登录方式", http.StatusBadRequest)
+		return
+	}
 	returnURL := request.URL.Query().Get("return")
-	if returnURL != "/settings/domains" {
+	if returnURL != "/identity" && returnURL != "/settings/domains" {
 		returnURL = "/settings/domains"
 	}
-	a.start(writer, request, pendingLogin{Mode: "maintenance", ReturnURL: returnURL, OwnerID: identity.Subject})
+	a.start(writer, request, pendingLogin{Mode: "reauth", ReturnURL: returnURL, OwnerID: identity.Subject})
 }
 
 func (a *AuthManager) startWebLogin(writer http.ResponseWriter, request *http.Request) {
@@ -203,15 +199,6 @@ func (a *AuthManager) startAppLogin(writer http.ResponseWriter, request *http.Re
 		return
 	}
 	a.start(writer, request, pendingLogin{Mode: "app", RedirectURI: redirectURI, ClientState: clientState, ClientChallenge: challenge})
-}
-
-func (a *AuthManager) startLink(writer http.ResponseWriter, request *http.Request) {
-	identity, err := a.Authenticate(request.Context(), request)
-	if err != nil {
-		http.Error(writer, err.Error(), http.StatusUnauthorized)
-		return
-	}
-	a.start(writer, request, pendingLogin{Mode: "link", ReturnURL: "/identities", OwnerID: identity.Subject})
 }
 
 func (a *AuthManager) start(writer http.ResponseWriter, request *http.Request, pending pendingLogin) {
@@ -248,7 +235,7 @@ func (a *AuthManager) start(writer http.ResponseWriter, request *http.Request, p
 		oauth2.SetAuthURLParam("code_challenge", base64.RawURLEncoding.EncodeToString(digest[:])),
 		oauth2.SetAuthURLParam("code_challenge_method", "S256"),
 	}
-	if pending.Mode == "maintenance" {
+	if pending.Mode == "reauth" {
 		options = append(options, oauth2.SetAuthURLParam("prompt", "login"), oauth2.SetAuthURLParam("max_age", "0"))
 	}
 	if provider.Kind == "oidc" {
@@ -282,30 +269,22 @@ func (a *AuthManager) completeLogin(writer http.ResponseWriter, request *http.Re
 		http.Error(writer, err.Error(), http.StatusUnauthorized)
 		return
 	}
-	if pending.Mode == "maintenance" {
-		owner, ok := a.store.Owner()
+	if pending.Mode == "reauth" {
+		owner, exists := a.store.Owner()
 		key := IdentityKey{Provider: external.Provider, Subject: external.Subject}
-		if !ok || owner.ID != pending.OwnerID || !containsIdentity(owner.Identities, key) || external.Provider != "pocket" {
-			http.Error(writer, "重新认证身份不是当前 HomeStack Owner", http.StatusForbidden)
+		if !exists || owner.ID != pending.OwnerID || !containsIdentity(owner.Identities, key) {
+			http.Error(writer, "重新认证身份不是当前 Owner", http.StatusForbidden)
 			return
 		}
 		cookie, err := request.Cookie("homestack_control_session")
 		if err != nil {
-			http.Error(writer, "重新认证缺少当前浏览器会话", http.StatusUnauthorized)
+			http.Error(writer, "重新认证缺少浏览器会话", http.StatusUnauthorized)
 			return
 		}
 		a.mu.Lock()
-		a.maintenanceGrants[maintenanceGrantKey(owner.ID, cookie.Value)] = a.now().UTC().Add(5 * time.Minute)
+		a.reauthGrants[owner.ID+"\x00"+hashAuthToken(cookie.Value)] = a.now().UTC().Add(5 * time.Minute)
 		a.mu.Unlock()
 		http.Redirect(writer, request, pending.ReturnURL+"?reauthenticated=1", http.StatusSeeOther)
-		return
-	}
-	if pending.Mode == "link" {
-		if err := a.store.Link(pending.OwnerID, external); err != nil {
-			http.Error(writer, err.Error(), http.StatusForbidden)
-			return
-		}
-		http.Redirect(writer, request, pending.ReturnURL, http.StatusSeeOther)
 		return
 	}
 	identity, err := a.store.AuthenticateOrClaim(external)
@@ -326,21 +305,17 @@ func (a *AuthManager) completeLogin(writer http.ResponseWriter, request *http.Re
 	http.Redirect(writer, request, pending.ReturnURL, http.StatusSeeOther)
 }
 
-func (a *AuthManager) ConsumeMaintenanceGrant(request *http.Request, ownerID string) bool {
+func (a *AuthManager) ConsumeReauth(request *http.Request, ownerID string) bool {
 	cookie, err := request.Cookie("homestack_control_session")
 	if err != nil {
 		return false
 	}
-	key := maintenanceGrantKey(ownerID, cookie.Value)
+	key := ownerID + "\x00" + hashAuthToken(cookie.Value)
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	expiresAt, ok := a.maintenanceGrants[key]
-	delete(a.maintenanceGrants, key)
+	expiresAt, ok := a.reauthGrants[key]
+	delete(a.reauthGrants, key)
 	return ok && a.now().UTC().Before(expiresAt)
-}
-
-func maintenanceGrantKey(ownerID, session string) string {
-	return ownerID + "\x00" + hashAuthToken(session)
 }
 
 func (a *AuthManager) completeAppLogin(writer http.ResponseWriter, request *http.Request, pending pendingLogin, identity Identity) {
@@ -403,18 +378,33 @@ func (a *AuthManager) refreshAppToken(writer http.ResponseWriter, request *http.
 }
 
 func (a *AuthManager) writeAppTokens(writer http.ResponseWriter, ownerID string) {
-	access, accessExpiry, err := a.store.CreateSession(ownerID, "access", time.Hour)
+	tokens, err := a.IssueAppTokens(ownerID)
 	if err != nil {
 		writeControlError(writer, http.StatusInternalServerError, "token_failed", err.Error())
 		return
+	}
+	writeJSON(writer, http.StatusOK, tokens)
+}
+
+type AppTokens struct {
+	AccessToken      string    `json:"access_token"`
+	ExpiresAt        time.Time `json:"expires_at"`
+	RefreshToken     string    `json:"refresh_token"`
+	RefreshExpiresAt time.Time `json:"refresh_expires_at"`
+	TokenType        string    `json:"token_type"`
+}
+
+func (a *AuthManager) IssueAppTokens(ownerID string) (AppTokens, error) {
+	access, accessExpiry, err := a.store.CreateSession(ownerID, "access", time.Hour)
+	if err != nil {
+		return AppTokens{}, err
 	}
 	refresh, refreshExpiry, err := a.store.CreateSession(ownerID, "refresh", 30*24*time.Hour)
 	if err != nil {
 		_ = a.store.RevokeSession(access)
-		writeControlError(writer, http.StatusInternalServerError, "token_failed", err.Error())
-		return
+		return AppTokens{}, err
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{"access_token": access, "expires_at": accessExpiry, "refresh_token": refresh, "refresh_expires_at": refreshExpiry, "token_type": "Bearer"})
+	return AppTokens{AccessToken: access, ExpiresAt: accessExpiry, RefreshToken: refresh, RefreshExpiresAt: refreshExpiry, TokenType: "Bearer"}, nil
 }
 
 func (a *AuthManager) logout(writer http.ResponseWriter, request *http.Request) {
@@ -540,9 +530,9 @@ func (a *AuthManager) pruneLocked() {
 			delete(a.appCodes, key)
 		}
 	}
-	for key, expiresAt := range a.maintenanceGrants {
+	for key, expiresAt := range a.reauthGrants {
 		if !now.Before(expiresAt) {
-			delete(a.maintenanceGrants, key)
+			delete(a.reauthGrants, key)
 		}
 	}
 }

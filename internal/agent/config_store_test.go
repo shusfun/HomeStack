@@ -53,11 +53,11 @@ func TestValidateDeviceConfigRejectsInsecureEndpoints(t *testing.T) {
 	now := time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
 	tests := []struct {
 		name   string
-		mutate func(*protocol.SignedDeviceConfigV1)
+		mutate func(*protocol.SignedDeviceConfig)
 	}{
-		{name: "Control 使用 HTTP", mutate: func(config *protocol.SignedDeviceConfigV1) { config.ControlURL = "http://app.example.com:8443" }},
-		{name: "Agent 端口错误", mutate: func(config *protocol.SignedDeviceConfigV1) { config.AgentURL = "https://device.tailnet.example:443" }},
-		{name: "有效期过长", mutate: func(config *protocol.SignedDeviceConfigV1) { config.ExpiresAt = now.Add(72 * time.Hour) }},
+		{name: "Control 使用 HTTP", mutate: func(config *protocol.SignedDeviceConfig) { config.ControlURL = "http://app.example.com" }},
+		{name: "Node 端口错误", mutate: func(config *protocol.SignedDeviceConfig) { config.AgentURL = "https://device.tail-name.ts.net:443" }},
+		{name: "有效期过长", mutate: func(config *protocol.SignedDeviceConfig) { config.ExpiresAt = now.Add(72 * time.Hour) }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -70,19 +70,18 @@ func TestValidateDeviceConfigRejectsInsecureEndpoints(t *testing.T) {
 	}
 }
 
-func validConfig(now time.Time, revision uint64) protocol.SignedDeviceConfigV1 {
-	return protocol.SignedDeviceConfigV1{
-		Version:    protocol.DeviceConfigVersion,
+func validConfig(now time.Time, revision uint64) protocol.SignedDeviceConfig {
+	return protocol.SignedDeviceConfig{
 		DeviceID:   "device-1",
 		DeviceName: "设备一",
 		Revision:   revision,
 		IssuedAt:   now,
 		ExpiresAt:  now.Add(time.Hour),
-		ControlURL: "https://app.example.com:8443",
-		AgentURL:   "https://device.tailnet.example:9443",
-		Modules: []protocol.ModuleConfigV1{{
-			ID: "filebrowser", Enabled: true, BaseURL: "http://127.0.0.1:8080", ReadOnly: true,
+		ControlURL: "https://app.example.com",
+		AgentURL:   "https://device.tail-name.ts.net:19443",
+		Modules: []protocol.ModuleConfig{{
+			ID: "jellyfin", Enabled: true, BaseURL: "http://127.0.0.1:8096", ReadOnly: true,
 		}},
-		SharedDirectories: []protocol.SharedDirectoryV1{{ID: "media", Name: "媒体", Permissions: []string{"read", "download"}}},
+		SharedDirectories: []protocol.SharedDirectory{{ID: "media", Name: "媒体", Path: "/srv/media"}},
 	}
 }

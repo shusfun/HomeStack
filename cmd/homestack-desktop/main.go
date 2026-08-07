@@ -10,11 +10,21 @@ import (
 	"github.com/wangshangbin/homestack/assets/brand"
 	"github.com/wangshangbin/homestack/internal/buildinfo"
 	"github.com/wangshangbin/homestack/internal/desktop"
+	"github.com/wangshangbin/homestack/internal/node"
 	"github.com/wangshangbin/homestack/internal/web"
 	"github.com/wangshangbin/homestack/internal/windowchrome"
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "--node" {
+		if err := desktop.ConfigureNodeEnvironment(); err != nil {
+			log.Fatal(err)
+		}
+		if err := node.Run(); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "--appimage-update-helper" {
 		if err := desktop.RunAppImageUpdateHelper(os.Args[2:]); err != nil {
 			log.Fatal(err)

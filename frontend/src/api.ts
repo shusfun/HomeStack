@@ -1,11 +1,11 @@
 import type { APIErrorResponse, Surface } from "./types";
 
 export async function detectSurface(): Promise<Surface> {
-  const setup = await probeSurface("/api/v1/setup/status", "setup");
+  const setup = await probeSurface("/api/setup/status", "setup");
   if (setup) return "setup";
-  const meta = await probeJSON("/api/v1/meta");
+  const meta = await probeJSON("/api/meta");
   if (meta) return "control";
-  const status = await probeJSON("/api/v1/status");
+  const status = await probeJSON("/api/status");
   if (status) return "agent";
   return "desktop";
 }

@@ -39,7 +39,7 @@ func TestReleaseManifest(t *testing.T) {
 	if err := json.Unmarshal(manifestData, &manifest); err != nil {
 		t.Fatal(err)
 	}
-	if manifest.SchemaVersion != 1 || manifest.Version != "1.2.3" || len(manifest.Artifacts) != 8 {
+	if manifest.SchemaVersion != 1 || manifest.Version != "3.2.3" || len(manifest.Artifacts) != 8 {
 		t.Fatalf("发布清单元数据不完整: schema=%d version=%q artifacts=%d", manifest.SchemaVersion, manifest.Version, len(manifest.Artifacts))
 	}
 	for _, platform := range []string{"darwin", "windows", "linux"} {
@@ -71,7 +71,7 @@ func TestReleaseManifest(t *testing.T) {
 	}
 	for _, arch := range []string{"amd64", "arm64"} {
 		for _, component := range []string{"control", "agent"} {
-			expectedSignatures["homestack-"+component+"_1.2.3_linux_"+arch+".tar.gz.sig"] = true
+			expectedSignatures["homestack-"+component+"_3.2.3_linux_"+arch+".tar.gz.sig"] = true
 		}
 	}
 	for _, entry := range entries {
@@ -131,7 +131,7 @@ func TestReleaseManifestRejectsMismatchedKey(t *testing.T) {
 
 func TestReleaseManifestRejectsMissingAsset(t *testing.T) {
 	dist, privateKey, publicKey := releaseFixture(t)
-	if err := os.Remove(filepath.Join(dist, "HomeStack_1.2.3_linux_arm64.deb")); err != nil {
+	if err := os.Remove(filepath.Join(dist, "HomeStack_3.2.3_linux_arm64.deb")); err != nil {
 		t.Fatal(err)
 	}
 	output, err := runReleaseManifest(t, dist, privateKey, publicKey)
@@ -142,7 +142,7 @@ func TestReleaseManifestRejectsMissingAsset(t *testing.T) {
 
 func TestReleaseManifestRejectsInvalidArchive(t *testing.T) {
 	dist, privateKey, publicKey := releaseFixture(t)
-	path := filepath.Join(dist, "HomeStack_1.2.3_windows_arm64_update.zip")
+	path := filepath.Join(dist, "HomeStack_3.2.3_windows_arm64_update.zip")
 	writeZip(t, path, map[string]string{"HomeStack.exe": "binary", "extra.txt": "unexpected"})
 	output, err := runReleaseManifest(t, dist, privateKey, publicKey)
 	if err == nil || !strings.Contains(output, "Windows 更新 zip 必须只含单顶层 HomeStack.exe") {
@@ -171,7 +171,7 @@ func runReleaseManifest(t *testing.T, dist string, privateKey, publicKey []byte)
 	arguments := []string{
 		"-test.run=TestReleaseManifestHelper", "--",
 		"--dist", dist,
-		"--tag", "v1.2.3",
+		"--tag", "v3.2.3",
 		"--repository", "shusfun/HomeStack",
 		"--private-key", base64.StdEncoding.EncodeToString(privateKey),
 		"--public-key", base64.StdEncoding.EncodeToString(publicKey),
@@ -190,19 +190,19 @@ func releaseFixture(t *testing.T) (string, ed25519.PrivateKey, ed25519.PublicKey
 	}
 	dist := t.TempDir()
 	for _, arch := range []string{"amd64", "arm64"} {
-		writeFile(t, filepath.Join(dist, "homestack-control_1.2.3_linux_"+arch+".tar.gz"), "control")
-		writeFile(t, filepath.Join(dist, "homestack-agent_1.2.3_linux_"+arch+".tar.gz"), "agent")
-		writeTarGzip(t, filepath.Join(dist, "homestack-agent-update_1.2.3_linux_"+arch+".tar.gz"), map[string]string{"homestack-agent": "binary"})
-		writeFile(t, filepath.Join(dist, "HomeStack_1.2.3_darwin_"+arch+".dmg"), "dmg")
-		writeTarGzip(t, filepath.Join(dist, "HomeStack_1.2.3_darwin_"+arch+"_update.tar.gz"), map[string]string{
+		writeFile(t, filepath.Join(dist, "homestack-control_3.2.3_linux_"+arch+".tar.gz"), "control")
+		writeFile(t, filepath.Join(dist, "homestack-agent_3.2.3_linux_"+arch+".tar.gz"), "agent")
+		writeTarGzip(t, filepath.Join(dist, "homestack-agent-update_3.2.3_linux_"+arch+".tar.gz"), map[string]string{"homestack-agent": "binary"})
+		writeFile(t, filepath.Join(dist, "HomeStack_3.2.3_darwin_"+arch+".dmg"), "dmg")
+		writeTarGzip(t, filepath.Join(dist, "HomeStack_3.2.3_darwin_"+arch+"_update.tar.gz"), map[string]string{
 			"HomeStack.app/Contents/MacOS/HomeStack": "binary",
 			"HomeStack.app/Contents/Info.plist":      "plist",
 		})
-		writeFile(t, filepath.Join(dist, "HomeStack_1.2.3_windows_"+arch+"_setup.exe"), "installer")
-		writeFile(t, filepath.Join(dist, "HomeStack_1.2.3_windows_"+arch+"_portable.zip"), "portable")
-		writeZip(t, filepath.Join(dist, "HomeStack_1.2.3_windows_"+arch+"_update.zip"), map[string]string{"HomeStack.exe": "binary"})
-		writeFile(t, filepath.Join(dist, "HomeStack_1.2.3_linux_"+arch+".AppImage"), "appimage")
-		writeFile(t, filepath.Join(dist, "HomeStack_1.2.3_linux_"+arch+".deb"), "deb")
+		writeFile(t, filepath.Join(dist, "HomeStack_3.2.3_windows_"+arch+"_setup.exe"), "installer")
+		writeFile(t, filepath.Join(dist, "HomeStack_3.2.3_windows_"+arch+"_portable.zip"), "portable")
+		writeZip(t, filepath.Join(dist, "HomeStack_3.2.3_windows_"+arch+"_update.zip"), map[string]string{"HomeStack.exe": "binary"})
+		writeFile(t, filepath.Join(dist, "HomeStack_3.2.3_linux_"+arch+".AppImage"), "appimage")
+		writeFile(t, filepath.Join(dist, "HomeStack_3.2.3_linux_"+arch+".deb"), "deb")
 	}
 	return dist, privateKey, publicKey
 }

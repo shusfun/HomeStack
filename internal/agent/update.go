@@ -69,6 +69,28 @@ type AgentUpdater struct {
 	stagedPath  string
 }
 
+type Updater interface {
+	Status() AgentUpdateStatus
+	Check(context.Context) (AgentUpdateStatus, error)
+	Download(context.Context) (AgentUpdateStatus, error)
+	Install() error
+}
+
+type DisabledUpdater struct{}
+
+func (DisabledUpdater) Status() AgentUpdateStatus {
+	return AgentUpdateStatus{State: "disabled", Error: "桌面 Node 由 HomeStack App 统一更新"}
+}
+func (DisabledUpdater) Check(context.Context) (AgentUpdateStatus, error) {
+	return AgentUpdateStatus{}, errors.New("桌面 Node 由 HomeStack App 统一更新")
+}
+func (DisabledUpdater) Download(context.Context) (AgentUpdateStatus, error) {
+	return AgentUpdateStatus{}, errors.New("桌面 Node 由 HomeStack App 统一更新")
+}
+func (DisabledUpdater) Install() error {
+	return errors.New("桌面 Node 由 HomeStack App 统一更新")
+}
+
 type updateProgressWriter struct {
 	destination io.Writer
 	written     int64
@@ -253,7 +275,7 @@ func (u *AgentUpdater) Install() error {
 	arguments := []string{
 		"--user", "--collect", "--unit=" + unit, "--property=Type=exec", target, "update-helper",
 		"--parent-pid=" + strconv.Itoa(os.Getpid()), "--target=" + target, "--staged=" + staged, "--backup=" + backup,
-		"--health-url=" + u.agentURL + "/api/v1/health",
+		"--health-url=" + u.agentURL + "/api/health",
 	}
 	output, err := exec.Command("systemd-run", arguments...).CombinedOutput()
 	if err != nil {

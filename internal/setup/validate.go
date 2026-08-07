@@ -2,32 +2,22 @@ package setup
 
 import (
 	"errors"
-	"fmt"
 	"net"
 	"strings"
 )
 
 func ValidateConfiguration(config Configuration) error {
-	hosts := map[string]string{
-		"Control 域名":   config.ControlHost,
-		"Pocket ID 域名": config.PocketHost,
-		"Headscale 域名": config.MeshHost,
-		"Tailnet 基础域名": config.TailHost,
+	if err := validateHostname(strings.ToLower(strings.TrimSpace(config.PublicHost))); err != nil {
+		return errors.New("VPS 域名无效: " + err.Error())
 	}
-	seen := map[string]string{}
-	for label, raw := range hosts {
-		host := strings.ToLower(strings.TrimSpace(raw))
-		if err := validateHostname(host); err != nil {
-			return fmt.Errorf("%s无效: %w", label, err)
-		}
-		if previous := seen[host]; previous != "" {
-			return fmt.Errorf("%s不能与%s相同", label, previous)
-		}
-		seen[host] = label
+	if config.Provider != "google" && config.Provider != "github" {
+		return errors.New("登录方式只能选择 Google 或 GitHub")
 	}
-	ip := net.ParseIP(strings.TrimSpace(config.PublicIPv4))
-	if ip == nil || ip.To4() == nil || ip.IsLoopback() || ip.IsUnspecified() || ip.IsPrivate() {
-		return errors.New("VPS 公网 IPv4 必须是明确的公网 IPv4 地址")
+	if strings.TrimSpace(config.ClientID) == "" || strings.TrimSpace(config.ClientSecret) == "" {
+		return errors.New("OAuth Client ID 和 Client Secret 必须完整填写")
+	}
+	if strings.ContainsAny(config.ClientID, "\r\n\x00") || strings.ContainsAny(config.ClientSecret, "\r\n\x00") {
+		return errors.New("OAuth 凭据包含非法控制字符")
 	}
 	return nil
 }

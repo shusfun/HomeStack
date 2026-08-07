@@ -23,7 +23,7 @@ input:focus, select:focus { border-color: #176b57; box-shadow: 0 0 0 3px rgba(23
 .muted { color: #748087; font-size: 12px; }
 
 .desktop-shell { height: 100vh; overflow: hidden; display: flex; flex-direction: column; }
-.desktop-chrome { height: 48px; flex: 0 0 48px; padding-left: 12px; border-bottom: 1px solid #d8dfe2; background: rgba(255, 255, 255, .96); display: flex; align-items: center; justify-content: space-between; }
+.desktop-chrome { height: 48px; flex: 0 0 48px; padding: 0 12px; border-bottom: 1px solid #d8dfe2; background: rgba(255, 255, 255, .96); display: flex; align-items: center; justify-content: space-between; }
 .desktop-chrome.mac { padding-left: 84px; }
 .chrome-brand { display: flex; align-items: center; gap: 9px; min-width: 0; font-size: 13px; }
 .chrome-brand small { color: #7a858a; font-size: 11px; }
@@ -53,9 +53,12 @@ input:focus, select:focus { border-color: #176b57; box-shadow: 0 0 0 3px rgba(23
 .provider-list { margin-top: 12px; display: flex; justify-content: center; flex-wrap: wrap; gap: 8px; }
 .provider-list button, .provider-list a { min-height: 38px; padding: 0 14px; border: 1px solid #cbd5d8; border-radius: 6px; background: #fff; color: #35434a; display: inline-flex; align-items: center; gap: 7px; text-decoration: none; }
 .compact-page > h1, .page > h1 { margin-bottom: 22px; }
-.back-button { margin-bottom: 15px; padding: 0; border: 0; background: transparent; color: #607078; display: flex; align-items: center; gap: 5px; }
+.desktop-page-header { min-height: 34px; margin-bottom: 22px; display: flex; align-items: center; gap: 9px; }
+.back-button { width: 32px; height: 32px; flex: 0 0 32px; border: 0; border-radius: 6px; background: transparent; color: #607078; display: grid; place-items: center; text-decoration: none; }
+.back-button:hover { background: #e7ecee; color: #176b57; }
 .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
 .form-grid label { display: grid; gap: 6px; color: #5d6a70; font-size: 12px; font-weight: 650; }
+.form-grid output { min-width: 0; overflow-wrap: anywhere; border: 1px solid var(--line); border-radius: 6px; background: #fff; padding: 10px; color: var(--text); font-family: ui-monospace, monospace; font-weight: 500; }
 .form-grid .primary-button { grid-column: 1 / -1; justify-self: start; }
 .command-box { margin-top: 18px; padding: 12px; border: 1px solid #a9c9bf; border-radius: 6px; background: #eef7f3; display: flex; align-items: center; gap: 12px; }
 .command-box > div { min-width: 0; flex: 1; display: grid; gap: 7px; }

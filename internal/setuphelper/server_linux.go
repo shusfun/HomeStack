@@ -18,18 +18,18 @@ import (
 
 func Run(ctx context.Context, socketPath string, allowedUID uint32) error {
 	if os.Geteuid() != 0 {
-		return errors.New("homestack-setup-helper 必须由 root 启动")
+		return errors.New("homestack-config-helper 必须由 root 启动")
 	}
 	if socketPath == "" || allowedUID == 0 {
-		return errors.New("Setup Helper 必须明确配置 Unix Socket 和非 root 调用 UID")
+		return errors.New("Config Helper 必须明确配置 Unix Socket 和非 root 调用 UID")
 	}
-	if err := os.MkdirAll("/run/homestack-setup", 0o755); err != nil {
+	if err := os.MkdirAll("/run/homestack-config", 0o755); err != nil {
 		return err
 	}
 	_ = os.Remove(socketPath)
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
-		return fmt.Errorf("监听 Setup Helper Socket 失败: %w", err)
+		return fmt.Errorf("监听 Config Helper Socket 失败: %w", err)
 	}
 	defer listener.Close()
 	defer os.Remove(socketPath)
@@ -66,7 +66,7 @@ func handleConnection(connection net.Conn, allowedUID uint32, manager *Manager) 
 	decoder := json.NewDecoder(io.LimitReader(connection, 32<<10))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&request); err != nil {
-		response.Error = "解析 Setup Helper 请求失败: " + err.Error()
+		response.Error = "解析 Config Helper 请求失败: " + err.Error()
 	} else {
 		ctx, cancel := context.WithTimeout(context.Background(), 9*time.Minute)
 		defer cancel()
@@ -81,8 +81,20 @@ func handleConnection(connection net.Conn, allowedUID uint32, manager *Manager) 
 			}
 		case "finalize":
 			response.Status, response.Error = result(manager.Finalize(ctx))
+		case "configuration":
+			config, err := manager.Configuration()
+			response.Status = setupapi.Status{Phase: setupapi.PhaseCompleted, Config: &config, UpdatedAt: time.Now().UTC()}
+			if err != nil {
+				response.Error = err.Error()
+			}
+		case "reconfigure":
+			if request.Config == nil {
+				response.Error = "Reconfigure 缺少配置"
+			} else {
+				response.Status, response.Error = result(manager.Reconfigure(ctx, *request.Config))
+			}
 		default:
-			response.Error = "Setup Helper 操作不在白名单中"
+			response.Error = "Config Helper 操作不在白名单中"
 		}
 	}
 	_ = json.NewEncoder(connection).Encode(response)
@@ -91,7 +103,7 @@ func handleConnection(connection net.Conn, allowedUID uint32, manager *Manager) 
 func authorize(connection net.Conn, allowedUID uint32) error {
 	unixConnection, ok := connection.(*net.UnixConn)
 	if !ok {
-		return errors.New("Setup Helper 只接受 Unix Socket")
+		return errors.New("Config Helper 只接受 Unix Socket")
 	}
 	raw, err := unixConnection.SyscallConn()
 	if err != nil {
@@ -108,7 +120,7 @@ func authorize(connection net.Conn, allowedUID uint32) error {
 		return socketErr
 	}
 	if credential == nil || credential.Uid != allowedUID {
-		return errors.New("Setup Helper 拒绝非 Control 用户连接")
+		return errors.New("Config Helper 拒绝非 Control 用户连接")
 	}
 	return nil
 }

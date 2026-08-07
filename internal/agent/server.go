@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,7 +31,7 @@ type ServerOptions struct {
 	Tailnet       TailnetStatus
 	ModuleSecrets map[string]map[string]string
 	System        SystemManager
-	Updater       *AgentUpdater
+	Updater       Updater
 }
 
 type Server struct {
@@ -40,10 +42,10 @@ type Server struct {
 	tailnet     TailnetStatus
 	proxyMu     sync.RWMutex
 	secrets     map[string]map[string]string
-	fileProxy   http.Handler
+	files       *FileService
 	mediaProxy  http.Handler
 	system      SystemManager
-	updater     *AgentUpdater
+	updater     Updater
 }
 
 func NewServer(options ServerOptions) (*Server, error) {
@@ -76,23 +78,12 @@ func (s *Server) Reload() error {
 	if !ok {
 		return errors.New("Agent 尚未获得有效签名配置")
 	}
-	var fileProxy http.Handler
 	var mediaProxy http.Handler
 	for _, module := range config.Modules {
 		if !module.Enabled {
 			continue
 		}
 		switch module.ID {
-		case "filebrowser":
-			token := s.secrets[ModuleKey(module)]["api_token"]
-			if token == "" {
-				return errors.New("FileBrowser 模块缺少 api_token")
-			}
-			proxy, err := NewFileBrowserProxy(module.BaseURL, token)
-			if err != nil {
-				return err
-			}
-			fileProxy = prefixProxy("/api/v1/files", "/api", proxy)
 		case "jellyfin":
 			apiKey := s.secrets[ModuleKey(module)]["api_key"]
 			if apiKey == "" {
@@ -102,11 +93,11 @@ func (s *Server) Reload() error {
 			if err != nil {
 				return err
 			}
-			mediaProxy = prefixProxy("/api/v1/media", "", proxy)
+			mediaProxy = prefixProxy("/api/media", "", proxy)
 		}
 	}
 	s.proxyMu.Lock()
-	s.fileProxy = fileProxy
+	s.files = NewFileService(config.SharedDirectories)
 	s.mediaProxy = mediaProxy
 	s.proxyMu.Unlock()
 	return nil
@@ -115,20 +106,21 @@ func (s *Server) Reload() error {
 func (s *Server) Handler(static http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /access", s.redeemTicket)
-	mux.HandleFunc("GET /api/v1/health", func(writer http.ResponseWriter, _ *http.Request) {
-		writeAgentJSON(writer, http.StatusOK, map[string]string{"status": "ok", "version": "v1"})
+	mux.HandleFunc("GET /api/health", func(writer http.ResponseWriter, _ *http.Request) {
+		writeAgentJSON(writer, http.StatusOK, map[string]string{"status": "ok"})
 	})
-	mux.Handle("GET /api/v1/status", s.requireSession(s.requireActiveConfig(http.HandlerFunc(s.status))))
-	mux.Handle("GET /api/v1/system/metrics", s.requireSession(s.requireActiveConfig(http.HandlerFunc(s.metrics))))
-	mux.Handle("GET /api/v1/services", s.requireSession(s.requireActiveConfig(http.HandlerFunc(s.services))))
-	mux.Handle("POST /api/v1/services/{serviceID}/actions", s.requireSession(s.requireActiveConfig(http.HandlerFunc(s.serviceAction))))
-	mux.Handle("GET /api/v1/logs", s.requireSession(s.requireActiveConfig(http.HandlerFunc(s.logs))))
-	mux.Handle("GET /api/v1/updates/status", s.requireSession(s.requireActiveConfig(http.HandlerFunc(s.updateStatus))))
-	mux.Handle("POST /api/v1/updates/check", s.requireSession(s.requireActiveConfig(http.HandlerFunc(s.checkUpdate))))
-	mux.Handle("POST /api/v1/updates/download", s.requireSession(s.requireActiveConfig(http.HandlerFunc(s.downloadUpdate))))
-	mux.Handle("POST /api/v1/updates/install", s.requireSession(s.requireActiveConfig(http.HandlerFunc(s.installUpdate))))
-	mux.Handle("/api/v1/files/", s.requireSession(s.requireActiveConfig(s.dynamicProxy("filebrowser"))))
-	mux.Handle("/api/v1/media/", s.requireSession(s.requireActiveConfig(s.dynamicProxy("jellyfin"))))
+	mux.Handle("GET /api/status", s.requireSession(s.requireActiveConfig(http.HandlerFunc(s.status))))
+	mux.Handle("GET /api/system/metrics", s.requireSession(s.requireActiveConfig(http.HandlerFunc(s.metrics))))
+	mux.Handle("GET /api/services", s.requireSession(s.requireActiveConfig(http.HandlerFunc(s.services))))
+	mux.Handle("POST /api/services/{serviceID}/actions", s.requireSession(s.requireActiveConfig(http.HandlerFunc(s.serviceAction))))
+	mux.Handle("GET /api/logs", s.requireSession(s.requireActiveConfig(http.HandlerFunc(s.logs))))
+	mux.Handle("GET /api/updates/status", s.requireSession(s.requireActiveConfig(http.HandlerFunc(s.updateStatus))))
+	mux.Handle("POST /api/updates/check", s.requireSession(s.requireActiveConfig(http.HandlerFunc(s.checkUpdate))))
+	mux.Handle("POST /api/updates/download", s.requireSession(s.requireActiveConfig(http.HandlerFunc(s.downloadUpdate))))
+	mux.Handle("POST /api/updates/install", s.requireSession(s.requireActiveConfig(http.HandlerFunc(s.installUpdate))))
+	mux.Handle("GET /api/files/resources", s.requireSession(s.requireActiveConfig(http.HandlerFunc(s.fileResources))))
+	mux.Handle("GET /api/files/raw", s.requireSession(s.requireActiveConfig(http.HandlerFunc(s.fileRaw))))
+	mux.Handle("/api/media/", s.requireSession(s.requireActiveConfig(s.dynamicProxy("jellyfin"))))
 	if static != nil {
 		mux.Handle("/", s.requireDocumentSession(static))
 	}
@@ -314,33 +306,33 @@ func (s *Server) status(writer http.ResponseWriter, request *http.Request) {
 	writeAgentJSON(writer, http.StatusOK, status)
 }
 
-func (s *Server) BuildStatus(ctx context.Context) (protocol.DeviceStatusV1, error) {
+func (s *Server) BuildStatus(ctx context.Context) (protocol.DeviceStatus, error) {
 	tailnet, err := s.tailnet.Status(ctx)
 	if err != nil {
-		return protocol.DeviceStatusV1{}, err
+		return protocol.DeviceStatus{}, err
 	}
 	config, ok := s.configStore.Current()
 	if !ok {
-		return protocol.DeviceStatusV1{}, errors.New("Agent 没有有效配置")
+		return protocol.DeviceStatus{}, errors.New("Agent 没有有效配置")
 	}
 	if !time.Now().UTC().Before(config.ExpiresAt) {
-		return protocol.DeviceStatusV1{}, errors.New("Agent 签名配置已过期")
+		return protocol.DeviceStatus{}, errors.New("Agent 签名配置已过期")
 	}
-	statuses := make([]protocol.ModuleStatusV1, 0, len(config.Modules))
+	statuses := make([]protocol.ModuleStatus, 0, len(config.Modules))
 	for _, module := range config.Modules {
 		if !module.Enabled {
 			continue
 		}
 		spec, err := components.FindSpec(module.ID)
 		if err != nil {
-			return protocol.DeviceStatusV1{}, err
+			return protocol.DeviceStatus{}, err
 		}
 		statuses = append(statuses, components.Check(ctx, spec))
 		statuses[len(statuses)-1].ID = ModuleKey(module)
 	}
-	return protocol.DeviceStatusV1{
-		Version: protocol.DeviceStatusVersion, DeviceID: s.deviceID, Name: s.deviceName, Online: tailnet.Online,
-		TailnetIP: tailnet.TailnetIP, Connection: tailnet.Connection, DERPRegion: tailnet.DERPRegion,
+	return protocol.DeviceStatus{
+		DeviceID: s.deviceID, Name: s.deviceName, Online: tailnet.Online,
+		TailscaleIP: tailnet.TailscaleIP, Connection: tailnet.Connection,
 		LastSeen: time.Now().UTC(), ConfigRevision: config.Revision, Modules: statuses,
 	}, nil
 }
@@ -349,11 +341,7 @@ func (s *Server) dynamicProxy(moduleID string) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		s.proxyMu.RLock()
 		var proxy http.Handler
-		if moduleID == "filebrowser" {
-			proxy = s.fileProxy
-		} else {
-			proxy = s.mediaProxy
-		}
+		proxy = s.mediaProxy
 		s.proxyMu.RUnlock()
 		if proxy == nil {
 			writeAgentError(writer, http.StatusNotFound, "module_disabled", "模块未启用")
@@ -361,6 +349,44 @@ func (s *Server) dynamicProxy(moduleID string) http.Handler {
 		}
 		proxy.ServeHTTP(writer, request)
 	})
+}
+
+func (s *Server) fileResources(writer http.ResponseWriter, request *http.Request) {
+	s.proxyMu.RLock()
+	files := s.files
+	s.proxyMu.RUnlock()
+	if files == nil {
+		writeAgentError(writer, http.StatusNotFound, "files_disabled", "未配置共享目录")
+		return
+	}
+	resource, err := files.List(request.URL.Query().Get("path"))
+	if err != nil {
+		writeAgentError(writer, http.StatusBadRequest, "files_rejected", err.Error())
+		return
+	}
+	writeAgentJSON(writer, http.StatusOK, resource)
+}
+
+func (s *Server) fileRaw(writer http.ResponseWriter, request *http.Request) {
+	s.proxyMu.RLock()
+	files := s.files
+	s.proxyMu.RUnlock()
+	if files == nil {
+		writeAgentError(writer, http.StatusNotFound, "files_disabled", "未配置共享目录")
+		return
+	}
+	path, info, err := files.ResolveFile(request.URL.Query().Get("files"))
+	if err != nil {
+		writeAgentError(writer, http.StatusBadRequest, "files_rejected", err.Error())
+		return
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		writeAgentError(writer, http.StatusInternalServerError, "files_failed", err.Error())
+		return
+	}
+	defer file.Close()
+	http.ServeContent(writer, request, info.Name(), info.ModTime(), file)
 }
 
 func (s *Server) requireSession(next http.Handler) http.Handler {
@@ -401,7 +427,11 @@ func agentSecurityHeaders(next http.Handler) http.Handler {
 	})
 }
 
-func ServeTLS(ctx context.Context, address, certFile, keyFile string, handler http.Handler) error {
+func ServeHTTP(ctx context.Context, address string, handler http.Handler) error {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() || port != "19444" {
+		return errors.New("Node 后端必须监听明确的回环地址 19444")
+	}
 	server := newStreamingServer(handler)
 	server.Addr = address
 	go func() {
@@ -410,7 +440,7 @@ func ServeTLS(ctx context.Context, address, certFile, keyFile string, handler ht
 		defer cancel()
 		_ = server.Shutdown(shutdownContext)
 	}()
-	if err := server.ListenAndServeTLS(certFile, keyFile); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 	return nil

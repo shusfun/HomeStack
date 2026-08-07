@@ -2,6 +2,8 @@ package desktop
 
 import (
 	"context"
+	"crypto/ecdh"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -12,11 +14,15 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"runtime"
 	"strings"
 	"time"
 
 	"github.com/wangshangbin/homestack/internal/protocol"
+	"github.com/wangshangbin/homestack/internal/secure"
 	"github.com/wangshangbin/homestack/internal/securestore"
+	"github.com/wangshangbin/homestack/internal/tailscale"
 )
 
 type OpenURL func(string) error
@@ -32,10 +38,10 @@ type Provider struct {
 }
 
 type Device struct {
-	ID       string                  `json:"id"`
-	Name     string                  `json:"name"`
-	AgentURL string                  `json:"agent_url"`
-	Status   protocol.DeviceStatusV1 `json:"status"`
+	ID       string                `json:"id"`
+	Name     string                `json:"name"`
+	AgentURL string                `json:"agent_url"`
+	Status   protocol.DeviceStatus `json:"status"`
 }
 
 type LoginResult struct {
@@ -59,7 +65,7 @@ func (c *APIClient) Providers(ctx context.Context, controlURL string) ([]Provide
 	var payload struct {
 		Providers []Provider `json:"providers"`
 	}
-	if err := c.requestJSON(ctx, http.MethodGet, controlURL+"/api/v1/meta", "", nil, &payload, http.StatusOK); err != nil {
+	if err := c.requestJSON(ctx, http.MethodGet, controlURL+"/api/meta", "", nil, &payload, http.StatusOK); err != nil {
 		return nil, err
 	}
 	if len(payload.Providers) == 0 {
@@ -126,7 +132,7 @@ func (c *APIClient) Login(ctx context.Context, controlURL, provider string) (sec
 	_ = callbackServer.Shutdown(shutdownContext)
 	cancel()
 	var tokens tokenResponse
-	if err := c.requestJSON(ctx, http.MethodPost, controlURL+"/api/v1/auth/app/token", "", map[string]string{
+	if err := c.requestJSON(ctx, http.MethodPost, controlURL+"/api/auth/app/token", "", map[string]string{
 		"code": code, "code_verifier": verifier,
 	}, &tokens, http.StatusOK); err != nil {
 		return securestore.AppSession{}, err
@@ -160,7 +166,7 @@ func (c *APIClient) refresh(ctx context.Context, session securestore.AppSession)
 		return securestore.AppSession{}, errors.New("App 登录已过期，请重新登录")
 	}
 	var tokens tokenResponse
-	if err := c.requestJSON(ctx, http.MethodPost, session.ControlURL+"/api/v1/auth/app/refresh", "", map[string]string{
+	if err := c.requestJSON(ctx, http.MethodPost, session.ControlURL+"/api/auth/app/refresh", "", map[string]string{
 		"refresh_token": session.RefreshToken,
 	}, &tokens, http.StatusOK); err != nil {
 		return securestore.AppSession{}, fmt.Errorf("刷新 App 登录失败: %w", err)
@@ -173,6 +179,99 @@ func (c *APIClient) refresh(ctx context.Context, session securestore.AppSession)
 		return securestore.AppSession{}, err
 	}
 	return updated, nil
+}
+
+func (c *APIClient) RegisterCurrentNode(ctx context.Context, status tailscale.Status) (securestore.DeviceProfile, error) {
+	session, err := securestore.LoadAppSession()
+	if err != nil {
+		return securestore.DeviceProfile{}, err
+	}
+	metadata, request, encryptionKey, err := c.registrationRequest(ctx, session.ControlURL, status)
+	if err != nil {
+		return securestore.DeviceProfile{}, err
+	}
+	var response protocol.RegistrationResponse
+	if err := c.AuthenticatedJSON(ctx, http.MethodPost, "/api/devices/register", request, &response, http.StatusCreated); err != nil {
+		return securestore.DeviceProfile{}, err
+	}
+	return saveRegistration(metadata, response, encryptionKey)
+}
+
+func (c *APIClient) ActivateCurrentNode(ctx context.Context, controlURL, code string, status tailscale.Status) (securestore.DeviceProfile, error) {
+	controlURL, err := validateControlURL(controlURL)
+	if err != nil {
+		return securestore.DeviceProfile{}, err
+	}
+	metadata, request, encryptionKey, err := c.registrationRequest(ctx, controlURL, status)
+	if err != nil {
+		return securestore.DeviceProfile{}, err
+	}
+	var result struct {
+		Session      tokenResponse                 `json:"session"`
+		Registration protocol.RegistrationResponse `json:"registration"`
+	}
+	if err := c.requestJSON(ctx, http.MethodPost, controlURL+"/api/auth/app/activate", "", map[string]any{"code": strings.TrimSpace(code), "node": request}, &result, http.StatusCreated); err != nil {
+		return securestore.DeviceProfile{}, err
+	}
+	session := securestore.AppSession{ControlURL: controlURL, AccessToken: result.Session.AccessToken, AccessExpiresAt: result.Session.ExpiresAt, RefreshToken: result.Session.RefreshToken, RefreshExpiresAt: result.Session.RefreshExpiresAt}
+	if err := securestore.SaveAppSession(session); err != nil {
+		return securestore.DeviceProfile{}, err
+	}
+	profile, err := saveRegistration(metadata, result.Registration, encryptionKey)
+	if err != nil {
+		_ = securestore.DeleteAppSession()
+		return securestore.DeviceProfile{}, err
+	}
+	return profile, nil
+}
+
+type registrationMetadata struct {
+	SigningKeyID     string `json:"signing_key_id"`
+	SigningPublicKey string `json:"signing_public_key"`
+}
+
+func (c *APIClient) registrationRequest(ctx context.Context, controlURL string, status tailscale.Status) (registrationMetadata, protocol.NodeRegistration, *ecdh.PrivateKey, error) {
+	var metadata registrationMetadata
+	if err := c.requestJSON(ctx, http.MethodGet, controlURL+"/api/meta", "", nil, &metadata, http.StatusOK); err != nil {
+		return metadata, protocol.NodeRegistration{}, nil, err
+	}
+	identityKey, err := securestore.LoadOrCreateDeviceIdentityKey()
+	if err != nil {
+		return metadata, protocol.NodeRegistration{}, nil, err
+	}
+	encryptionKey, err := secure.GenerateX25519Key()
+	if err != nil {
+		return metadata, protocol.NodeRegistration{}, nil, err
+	}
+	name, err := os.Hostname()
+	if err != nil || strings.TrimSpace(name) == "" {
+		return metadata, protocol.NodeRegistration{}, nil, errors.New("读取设备名称失败")
+	}
+	request := protocol.NodeRegistration{Name: name, Platform: runtime.GOOS, Architecture: runtime.GOARCH, TailscaleIP: status.TailscaleIP, MagicDNS: status.MagicDNS, DevicePublicKey: base64.RawURLEncoding.EncodeToString(identityKey.Public().(ed25519.PublicKey)), EncryptionPublicKey: base64.RawURLEncoding.EncodeToString(encryptionKey.PublicKey().Bytes())}
+	return metadata, request, encryptionKey, nil
+}
+
+func saveRegistration(metadata registrationMetadata, response protocol.RegistrationResponse, encryptionKey *ecdh.PrivateKey) (securestore.DeviceProfile, error) {
+	var credential protocol.DeviceCredential
+	if err := secure.OpenJSON(encryptionKey, response.SealedCredential, &credential); err != nil {
+		return securestore.DeviceProfile{}, fmt.Errorf("解密设备凭据失败: %w", err)
+	}
+	if credential.DeviceID != response.DeviceID || !time.Now().UTC().Before(credential.ExpiresAt) {
+		return securestore.DeviceProfile{}, errors.New("Control 返回的设备凭据无效")
+	}
+	publicKey, err := base64.RawURLEncoding.DecodeString(metadata.SigningPublicKey)
+	if err != nil || len(publicKey) != ed25519.PublicKeySize {
+		return securestore.DeviceProfile{}, errors.New("Control 签名公钥无效")
+	}
+	var config protocol.SignedDeviceConfig
+	if err := secure.VerifyJWS(response.SignedConfig, ed25519.PublicKey(publicKey), metadata.SigningKeyID, &config); err != nil {
+		return securestore.DeviceProfile{}, err
+	}
+	profile := securestore.DeviceProfile{DeviceID: response.DeviceID, DeviceName: response.DeviceName, ControlKeyID: metadata.SigningKeyID, ControlPublicKey: metadata.SigningPublicKey, SignedConfig: response.SignedConfig, Credential: credential}
+	if err := securestore.SaveDeviceProfile(profile); err != nil {
+		return securestore.DeviceProfile{}, err
+	}
+	return profile, nil
 }
 
 func (c *APIClient) requestJSON(ctx context.Context, method, endpoint, accessToken string, body, target any, expected int) error {

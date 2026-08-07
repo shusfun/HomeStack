@@ -94,7 +94,7 @@ package_cli() {
     go build -trimpath -buildvcs=false -ldflags "$ldflags" -o "$install_root/homestack-helper" ./cmd/homestack-helper
   fi
   if [[ "$component" == "control" ]]; then
-    go build -trimpath -buildvcs=false -ldflags "$ldflags" -o "$install_root/homestack-setup-helper" ./cmd/homestack-setup-helper
+    go build -trimpath -buildvcs=false -ldflags "$ldflags" -o "$install_root/homestack-config-helper" ./cmd/homestack-config-helper
   fi
   cp README.md "$install_root/"
   cp -R docs deploy "$install_root/"

@@ -1,73 +1,42 @@
-# 原生部署
+# 部署
 
-HomeStack Control 通过 GitHub Release 原生安装，不使用 Docker。首次安装会启动一次性 Setup，由 Setup Helper 安装并固定校验 Headscale `0.29.3` 与 Pocket ID `2.12.0`；任何下载、摘要或配置检查失败都会保留 Setup 状态并返回真实错误。
+## VPS
 
-## 1. DNS、端口与宝塔
+VPS 只运行 HomeStack Control，不安装 Tailscale。公网仅开放 TCP `80/443`，Control 仅监听 `127.0.0.1:18443`。
 
-先为同一台 VPS 配置四个不重复的直连 DNS 记录。Control、Pocket ID、Headscale 的 DNS 必须直接解析到 VPS 公网 IPv4，不得启用 Cloudflare Proxy、Tunnel 或其他中间代理。
+宝塔只配置一个站点：
 
-宝塔负责公网 TLS，并配置以下 HTTP 反向代理：
-
-| 公网域名 | 宝塔上游 | 说明 |
-| --- | --- | --- |
-| `app.example.com` | `http://127.0.0.1:8443` | HomeStack Control 与首次 Setup |
-| `id.example.com` | `http://127.0.0.1:8444` | Pocket ID |
-| `mesh.example.com` | `http://127.0.0.1:18080` | Headscale HTTP 与 WebSocket |
-
-Headscale 站点必须透传 `Upgrade`/`Connection` WebSocket 请求头并关闭代理缓冲。`127.0.0.1:50443` 是 Headscale gRPC，只供本机 Control 使用，不配置宝塔反代。
-
-公网防火墙只开放 TCP `80/443` 和 UDP `3478`。不得开放 TCP `8443`、`8444`、`18080`、`50443`。Tailnet 基础域名（例如 `tail.example.com`）用于设备名称，不作为 VPS 后端端口。
-
-## 2. 安装与 Setup
-
-使用 Release 验签公钥运行官方安装器：
-
-```bash
-UPDATE_PUBLIC_KEY='REPLACE_WITH_BASE64_ED25519_PUBLIC_KEY'
-curl -fsSL https://raw.githubusercontent.com/shusfun/HomeStack/v0.1.8/deploy/install.sh | \
-  sudo bash -s -- control --version v0.1.8 --update-public-key "$UPDATE_PUBLIC_KEY"
+```text
+https://home.example.com -> http://127.0.0.1:18443
 ```
 
-安装器会校验 Control Release 的 Ed25519 签名、内嵌版本和架构，保留已有 Control 签名密钥，并在首次安装时输出 256 位一次性 Setup 令牌。令牌只保存 SHA-256 摘要，首次成功兑换后立即删除；Setup 会话固定有效 24 小时且重启后仍不可重复兑换令牌。
+DNS 必须直接解析到 VPS，TLS 由宝塔终止。HomeStack 不写入或重载宝塔配置。
 
-将宝塔 Control 站点指向 `http://127.0.0.1:8443`，打开 `https://app.example.com/setup` 并输入安装器输出的令牌。Setup 页面依次完成：
+首次安装后访问 `/setup`，输入安装器输出的一次性令牌，然后填写：
 
-1. 校验四个域名和 VPS 公网 IPv4。
-2. 安装并启动 Pocket ID，在 Pocket ID 原生 `/setup` 创建首个 Passkey 管理员。
-3. 创建受限用户组及 HomeStack、Headscale 两个 confidential PKCE S256 OIDC 客户端。
-4. 校验 Headscale policy/config 和 Control 配置，再切换到正式服务。
+- VPS 域名，例如 `home.example.com`
+- Google 或 GitHub，二选一
+- OAuth Client ID 和 Client Secret
 
-Setup 完成后安装接口永久返回 `423 setup_locked`，一次性 Setup Helper 停止，权限更窄的 Maintenance Helper 启动。首次通过 Pocket ID 登录 Control 的用户认领唯一 Owner。
+回调地址固定为 `https://<VPS域名>/auth/callback/<provider>`。Setup 完成后安装接口永久锁定，第一个成功 OAuth 登录者认领唯一 Owner。
 
-Setup 未完成且令牌确实丢失时，root 可显式重置：
+## 设备
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/shusfun/HomeStack/v0.1.8/deploy/install.sh | \
-  sudo bash -s -- upgrade control --version v0.1.8 --reset-setup-token \
-  --update-public-key "$UPDATE_PUBLIC_KEY"
-```
+所有设备先自行安装并登录同一官方 Tailscale Tailnet。HomeStack 不修改 Tailnet 登录状态。
 
-完成标记存在后该参数会被永久拒绝。
-
-## 3. 域名与公网 IP 迁移
-
-不需要重新安装。在 Control 的“设置 -> 域名与网络”提交完整五项配置。提交前必须：
-
-1. 先在 DNS、宝塔和证书中配置新域名，并确认新域名已反代到当前 VPS。
-2. 使用 Pocket ID Passkey 重新认证当前 Owner；授权绑定当前浏览器会话，五分钟过期且单次使用。
-3. 输入新的 Control 域名作为确认文本。
-
-迁移期间 Maintenance Helper 会保留新旧 OIDC 回调，结构化更新 Headscale YAML，逐项重启并健康检查。成功后删除旧回调和临时 Pocket API Key，浏览器跳转到新 Control 域名重新登录；失败时恢复配置、回调和服务并返回原始错误及回滚错误。
-
-存在已登记设备时禁止修改 Tailnet 基础域名；Control、Pocket ID、Headscale 域名和 VPS 公网 IPv4可独立迁移。Owner 始终按稳定的 `provider + subject` 识别，不会重新认领。
-
-## 4. 设备端
-
-设备端继续使用 Release 安装器安装 Agent。以最终用户运行，不能对整个 Agent 安装器使用 sudo：
+Owner 可在 Control 生成十分钟单次激活码。桌面 App 填写 VPS 域名后可直接 OAuth 登录，或使用激活码；两种方式都会登记本机 Node。Linux headless 使用：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/shusfun/HomeStack/v0.1.8/deploy/install.sh | \
-  bash -s -- agent --version v0.1.8 --update-public-key "$UPDATE_PUBLIC_KEY"
+homestack-agent activate --server https://home.example.com --activation-code <code>
+systemctl --user enable --now homestack-agent.service
 ```
 
-Agent 只在设备 Tailnet IP 的 TCP `9443` 提供 HTTPS。FileBrowser、Jellyfin 和管理端口不得暴露到公网。完整验证项目见 [acceptance.md](acceptance.md)。
+Node 后端监听 `127.0.0.1:19444`，Tailscale Serve 使用 `19443`。如果该端口已被其他 Serve 映射或 Funnel 占用，Node 会直接失败，不覆盖现有配置。
+
+手机必须登录同一 Tailnet。公网 Control 只签发访问票据并跳转到设备 MagicDNS，不代理设备内容。
+
+## 维护
+
+更换 VPS 域名前，先让新旧域名同时反代 `127.0.0.1:18443`。Owner 在 Control 使用当前登录源重新认证并确认新域名；Control 校验新域名 DNS、TLS 和健康接口后更新在线 Node 配置、使现有会话失效并切换域名，不需要重装。
+
+Google 与 GitHub 的切换同样要求当前身份重新认证。新 OAuth 应用必须同时配置页面显示的 `/auth/provider-switch/callback/<provider>` 和正式 `/auth/callback/<provider>` 回调；新身份验证成功后，Control 保持 Owner ID 不变，原子替换登录源配置和 Owner 身份，然后要求重新登录。

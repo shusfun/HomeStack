@@ -18,10 +18,7 @@ import (
 	"time"
 
 	"github.com/wangshangbin/homestack/internal/buildinfo"
-	"github.com/wangshangbin/homestack/internal/components"
 	"github.com/wangshangbin/homestack/internal/control"
-	"github.com/wangshangbin/homestack/internal/invite"
-	"github.com/wangshangbin/homestack/internal/maintenance"
 	setupapi "github.com/wangshangbin/homestack/internal/setup"
 	"github.com/wangshangbin/homestack/internal/web"
 )
@@ -62,13 +59,6 @@ func run() error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	headscaleSpec, err := components.FindSpec("headscale")
-	if err != nil {
-		return err
-	}
-	if err := components.RequireVersion(ctx, headscaleSpec); err != nil {
-		return err
-	}
 	owners, err := control.OpenOwnerStore(filepath.Join(settings.stateDir, "owner.json"))
 	if err != nil {
 		return err
@@ -81,15 +71,11 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	invites, err := invite.Open(filepath.Join(settings.stateDir, "invites.json"))
-	if err != nil {
-		return err
-	}
 	devices, err := control.OpenDeviceStore(filepath.Join(settings.stateDir, "devices.json"))
 	if err != nil {
 		return err
 	}
-	headscale, err := control.NewHeadscaleCLI(settings.headscaleConfig)
+	activations, err := control.OpenActivationStore(filepath.Join(settings.stateDir, "activations.json"), time.Now, rand.Reader)
 	if err != nil {
 		return err
 	}
@@ -98,38 +84,34 @@ func run() error {
 		return err
 	}
 	server, err := control.NewServer(control.ServerOptions{
-		Authenticator: authenticator, Owners: owners, Invites: invites, Devices: devices, Headscale: headscale,
+		Authenticator: authenticator, Owners: owners, Devices: devices, Activations: activations,
 		SigningKey: signingKey, SigningKeyID: settings.signingKeyID, PublicURL: settings.publicURL,
-		HeadscaleURL: settings.headscaleURL, Maintenance: maintenance.SocketClient{},
+		ConfigHelper: setupapi.SocketClient{},
 	})
 	if err != nil {
 		return err
 	}
 	log.Printf("HomeStack Control 正在监听 %s (%s)", settings.address, settings.transport)
-	if settings.transport == "reverse-proxy" {
-		return control.ServeReverseProxy(ctx, settings.address, server.Handler(web.Handler()))
-	}
-	return control.ServeTLS(ctx, settings.address, settings.tlsCert, settings.tlsKey, server.Handler(web.Handler()))
+	return control.ServeReverseProxy(ctx, settings.address, server.Handler(web.Handler()))
 }
 
 type controlSettings struct {
-	transport, address, publicURL, headscaleURL, stateDir, headscaleConfig, tlsCert, tlsKey string
-	signingKeyPath, signingKeyID                                                            string
-	pocketIssuer, pocketClientID, pocketClientSecret                                        string
-	googleClientID, googleClientSecret                                                      string
-	githubClientID, githubClientSecret                                                      string
+	transport, address, publicURL, stateDir string
+	signingKeyPath, signingKeyID            string
+	provider, clientID, clientSecret        string
 }
 
 func loadSettings() (controlSettings, error) {
 	values := map[string]string{
-		"HOMESTACK_CONTROL_TRANSPORT": os.Getenv("HOMESTACK_CONTROL_TRANSPORT"),
-		"HOMESTACK_CONTROL_ADDR":      os.Getenv("HOMESTACK_CONTROL_ADDR"),
-		"HOMESTACK_PUBLIC_URL":        os.Getenv("HOMESTACK_PUBLIC_URL"),
-		"HOMESTACK_HEADSCALE_URL":     os.Getenv("HOMESTACK_HEADSCALE_URL"),
-		"HOMESTACK_STATE_DIR":         os.Getenv("HOMESTACK_STATE_DIR"),
-		"HOMESTACK_HEADSCALE_CONFIG":  os.Getenv("HOMESTACK_HEADSCALE_CONFIG"),
-		"HOMESTACK_SIGNING_KEY":       os.Getenv("HOMESTACK_SIGNING_KEY"),
-		"HOMESTACK_SIGNING_KEY_ID":    os.Getenv("HOMESTACK_SIGNING_KEY_ID"),
+		"HOMESTACK_CONTROL_TRANSPORT":   os.Getenv("HOMESTACK_CONTROL_TRANSPORT"),
+		"HOMESTACK_CONTROL_ADDR":        os.Getenv("HOMESTACK_CONTROL_ADDR"),
+		"HOMESTACK_PUBLIC_URL":          os.Getenv("HOMESTACK_PUBLIC_URL"),
+		"HOMESTACK_STATE_DIR":           os.Getenv("HOMESTACK_STATE_DIR"),
+		"HOMESTACK_SIGNING_KEY":         os.Getenv("HOMESTACK_SIGNING_KEY"),
+		"HOMESTACK_SIGNING_KEY_ID":      os.Getenv("HOMESTACK_SIGNING_KEY_ID"),
+		"HOMESTACK_OAUTH_PROVIDER":      os.Getenv("HOMESTACK_OAUTH_PROVIDER"),
+		"HOMESTACK_OAUTH_CLIENT_ID":     os.Getenv("HOMESTACK_OAUTH_CLIENT_ID"),
+		"HOMESTACK_OAUTH_CLIENT_SECRET": os.Getenv("HOMESTACK_OAUTH_CLIENT_SECRET"),
 	}
 	for name, value := range values {
 		if strings.TrimSpace(value) == "" {
@@ -137,42 +119,30 @@ func loadSettings() (controlSettings, error) {
 		}
 	}
 	transport := values["HOMESTACK_CONTROL_TRANSPORT"]
-	tlsCert, tlsKey := os.Getenv("HOMESTACK_TLS_CERT"), os.Getenv("HOMESTACK_TLS_KEY")
-	switch transport {
-	case "tls":
-		if strings.TrimSpace(tlsCert) == "" || strings.TrimSpace(tlsKey) == "" {
-			return controlSettings{}, errors.New("tls 模式必须同时设置 HOMESTACK_TLS_CERT 和 HOMESTACK_TLS_KEY")
-		}
-	case "reverse-proxy":
-		host, _, err := net.SplitHostPort(values["HOMESTACK_CONTROL_ADDR"])
-		if err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() {
-			return controlSettings{}, errors.New("reverse-proxy 模式必须绑定明确的回环 IP 和端口")
-		}
-		if strings.TrimSpace(tlsCert) != "" || strings.TrimSpace(tlsKey) != "" {
-			return controlSettings{}, errors.New("reverse-proxy 模式不允许配置后端 TLS 证书")
-		}
-	default:
-		return controlSettings{}, errors.New("HOMESTACK_CONTROL_TRANSPORT 必须明确设置为 tls 或 reverse-proxy")
+	if transport != "reverse-proxy" {
+		return controlSettings{}, errors.New("HOMESTACK_CONTROL_TRANSPORT 必须设置为 reverse-proxy")
+	}
+	host, _, err := net.SplitHostPort(values["HOMESTACK_CONTROL_ADDR"])
+	if err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() {
+		return controlSettings{}, errors.New("Control 必须绑定明确的回环 IP 和端口")
+	}
+	if strings.TrimSpace(os.Getenv("HOMESTACK_TLS_CERT")) != "" || strings.TrimSpace(os.Getenv("HOMESTACK_TLS_KEY")) != "" {
+		return controlSettings{}, errors.New("Control 后端不允许配置 TLS 证书")
 	}
 	return controlSettings{
 		transport: transport, address: values["HOMESTACK_CONTROL_ADDR"], publicURL: values["HOMESTACK_PUBLIC_URL"],
-		headscaleURL: values["HOMESTACK_HEADSCALE_URL"],
-		stateDir:     values["HOMESTACK_STATE_DIR"], headscaleConfig: values["HOMESTACK_HEADSCALE_CONFIG"],
-		tlsCert: tlsCert, tlsKey: tlsKey,
+		stateDir:       values["HOMESTACK_STATE_DIR"],
 		signingKeyPath: values["HOMESTACK_SIGNING_KEY"], signingKeyID: values["HOMESTACK_SIGNING_KEY_ID"],
-		pocketIssuer: os.Getenv("HOMESTACK_POCKET_ID_ISSUER"), pocketClientID: os.Getenv("HOMESTACK_POCKET_ID_CLIENT_ID"),
-		pocketClientSecret: os.Getenv("HOMESTACK_POCKET_ID_CLIENT_SECRET"), googleClientID: os.Getenv("HOMESTACK_GOOGLE_CLIENT_ID"),
-		googleClientSecret: os.Getenv("HOMESTACK_GOOGLE_CLIENT_SECRET"), githubClientID: os.Getenv("HOMESTACK_GITHUB_CLIENT_ID"),
-		githubClientSecret: os.Getenv("HOMESTACK_GITHUB_CLIENT_SECRET"),
+		provider: values["HOMESTACK_OAUTH_PROVIDER"], clientID: values["HOMESTACK_OAUTH_CLIENT_ID"], clientSecret: values["HOMESTACK_OAUTH_CLIENT_SECRET"],
 	}, nil
 }
 
 func runSetup(arguments []string) error {
 	flags := flag.NewFlagSet("setup", flag.ContinueOnError)
-	address := flags.String("addr", "127.0.0.1:8443", "Setup 回环监听地址")
+	address := flags.String("addr", "127.0.0.1:18443", "Setup 回环监听地址")
 	tokenHash := flags.String("token-hash", "/etc/homestack/setup-token.sha256", "Setup 令牌 SHA-256 文件")
 	sessionPath := flags.String("session", "/etc/homestack/setup-session.json", "Setup 会话摘要文件")
-	socket := flags.String("socket", setupapi.DefaultSocketPath, "Setup Helper Unix Socket")
+	socket := flags.String("socket", setupapi.DefaultSocketPath, "Config Helper Unix Socket")
 	if err := flags.Parse(arguments); err != nil {
 		return err
 	}
@@ -208,17 +178,7 @@ func configtest(arguments []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	headscaleSpec, err := components.FindSpec("headscale")
-	if err != nil {
-		return err
-	}
-	if err := components.RequireVersion(ctx, headscaleSpec); err != nil {
-		return err
-	}
 	if _, err := createProviders(ctx, settings); err != nil {
-		return err
-	}
-	if _, err := control.NewHeadscaleCLI(settings.headscaleConfig); err != nil {
 		return err
 	}
 	if _, err := loadPrivateKey(settings.signingKeyPath); err != nil {
@@ -249,32 +209,21 @@ func loadEnvFile(path string) error {
 }
 
 func createProviders(ctx context.Context, settings controlSettings) ([]*control.OAuthProvider, error) {
-	providers := make([]*control.OAuthProvider, 0, 3)
-	if settings.pocketIssuer != "" || settings.pocketClientID != "" || settings.pocketClientSecret != "" {
-		provider, err := control.NewOIDCProvider(ctx, "pocket", "Pocket ID", settings.pocketIssuer, settings.pocketClientID, settings.pocketClientSecret, settings.publicURL)
+	if settings.provider == "google" {
+		provider, err := control.NewOIDCProvider(ctx, "google", "Google", "https://accounts.google.com", settings.clientID, settings.clientSecret, settings.publicURL)
 		if err != nil {
 			return nil, err
 		}
-		providers = append(providers, provider)
+		return []*control.OAuthProvider{provider}, nil
 	}
-	if settings.googleClientID != "" || settings.googleClientSecret != "" {
-		provider, err := control.NewOIDCProvider(ctx, "google", "Google", "https://accounts.google.com", settings.googleClientID, settings.googleClientSecret, settings.publicURL)
+	if settings.provider == "github" {
+		provider, err := control.NewGitHubProvider(settings.clientID, settings.clientSecret, settings.publicURL)
 		if err != nil {
 			return nil, err
 		}
-		providers = append(providers, provider)
+		return []*control.OAuthProvider{provider}, nil
 	}
-	if settings.githubClientID != "" || settings.githubClientSecret != "" {
-		provider, err := control.NewGitHubProvider(settings.githubClientID, settings.githubClientSecret, settings.publicURL)
-		if err != nil {
-			return nil, err
-		}
-		providers = append(providers, provider)
-	}
-	if len(providers) == 0 {
-		return nil, errors.New("必须完整配置 Pocket ID、Google 或 GitHub 中至少一种登录方式")
-	}
-	return providers, nil
+	return nil, errors.New("HOMESTACK_OAUTH_PROVIDER 只能是 google 或 github")
 }
 
 func keygen(arguments []string) error {

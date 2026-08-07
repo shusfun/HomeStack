@@ -20,12 +20,12 @@ type ControlClient struct {
 	HTTPClient  *http.Client
 }
 
-func (c *ControlClient) PostStatus(ctx context.Context, status protocol.DeviceStatusV1) error {
+func (c *ControlClient) PostStatus(ctx context.Context, status protocol.DeviceStatus) error {
 	body, err := json.Marshal(status)
 	if err != nil {
 		return fmt.Errorf("编码设备状态失败: %w", err)
 	}
-	endpoint := c.BaseURL + "/api/v1/devices/" + url.PathEscape(c.DeviceID) + "/status"
+	endpoint := c.BaseURL + "/api/devices/" + url.PathEscape(c.DeviceID) + "/status"
 	request, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -44,7 +44,7 @@ func (c *ControlClient) PostStatus(ctx context.Context, status protocol.DeviceSt
 }
 
 func (c *ControlClient) RefreshConfig(ctx context.Context, store *ConfigStore) error {
-	endpoint := c.BaseURL + "/api/v1/device/config?device_id=" + url.QueryEscape(c.DeviceID)
+	endpoint := c.BaseURL + "/api/device/config?device_id=" + url.QueryEscape(c.DeviceID)
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return err

@@ -29,9 +29,8 @@ type serviceSpec struct {
 }
 
 var serviceSpecs = map[string]serviceSpec{
-	"tailscale":       {Unit: "tailscaled.service", Actions: []string{"restart"}},
+	"tailscale":       {Unit: "tailscaled.service", Actions: []string{}},
 	"homestack-agent": {Unit: "homestack-agent.service", User: true, Actions: []string{"restart"}},
-	"filebrowser":     {Unit: "filebrowser.service", Actions: []string{"start", "stop", "restart"}},
 	"jellyfin":        {Unit: "jellyfin.service", Actions: []string{"start", "stop", "restart"}},
 }
 
@@ -165,7 +164,7 @@ func (s *Server) dispatch(request agent.HelperRequest) agent.HelperResponse {
 }
 
 func (s *Server) services(ctx context.Context) ([]agent.ServiceStatus, error) {
-	ids := []string{"tailscale", "homestack-agent", "filebrowser", "jellyfin"}
+	ids := []string{"tailscale", "homestack-agent", "jellyfin"}
 	result := make([]agent.ServiceStatus, 0, len(ids))
 	for _, id := range ids {
 		spec := serviceSpecs[id]

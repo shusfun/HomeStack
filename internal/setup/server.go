@@ -112,10 +112,10 @@ func (s *Server) loadCredentialState() error {
 
 func (s *Server) Handler(static http.Handler) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /api/v1/setup/status", s.status)
-	mux.HandleFunc("POST /api/v1/setup/session", s.createSession)
-	mux.HandleFunc("POST /api/v1/setup/prepare", s.prepare)
-	mux.HandleFunc("POST /api/v1/setup/finalize", s.finalize)
+	mux.HandleFunc("GET /api/setup/status", s.status)
+	mux.HandleFunc("POST /api/setup/session", s.createSession)
+	mux.HandleFunc("POST /api/setup/prepare", s.prepare)
+	mux.HandleFunc("POST /api/setup/finalize", s.finalize)
 	mux.HandleFunc("GET /healthz", func(writer http.ResponseWriter, _ *http.Request) {
 		writeJSON(writer, http.StatusOK, map[string]string{"status": "setup"})
 	})
@@ -327,33 +327,23 @@ func (s *Server) allowAttempt(client string) bool {
 }
 
 func validateDNS(ctx context.Context, config Configuration) error {
-	expected := net.ParseIP(config.PublicIPv4).To4()
-	resolver := net.DefaultResolver
-	for _, host := range []string{config.ControlHost, config.PocketHost, config.MeshHost} {
-		addresses, err := resolver.LookupIP(ctx, "ip4", host)
-		if err != nil {
-			return fmt.Errorf("解析域名 %s 失败: %w", host, err)
-		}
-		matched := false
-		for _, address := range addresses {
-			if address.To4() != nil && address.To4().Equal(expected) {
-				matched = true
-				break
-			}
-		}
-		if !matched {
-			return fmt.Errorf("域名 %s 未直接解析到 VPS 公网 IPv4 %s", host, config.PublicIPv4)
+	addresses, err := net.DefaultResolver.LookupIP(ctx, "ip", config.PublicHost)
+	if err != nil {
+		return fmt.Errorf("解析域名 %s 失败: %w", config.PublicHost, err)
+	}
+	for _, address := range addresses {
+		if address.IsGlobalUnicast() && !address.IsPrivate() {
+			return nil
 		}
 	}
-	return nil
+	return fmt.Errorf("域名 %s 未解析到公网地址", config.PublicHost)
 }
 
 func normalizeConfiguration(config Configuration) Configuration {
-	config.ControlHost = strings.ToLower(strings.TrimSpace(config.ControlHost))
-	config.PocketHost = strings.ToLower(strings.TrimSpace(config.PocketHost))
-	config.MeshHost = strings.ToLower(strings.TrimSpace(config.MeshHost))
-	config.TailHost = strings.ToLower(strings.TrimSpace(config.TailHost))
-	config.PublicIPv4 = strings.TrimSpace(config.PublicIPv4)
+	config.PublicHost = strings.ToLower(strings.TrimSpace(config.PublicHost))
+	config.Provider = strings.ToLower(strings.TrimSpace(config.Provider))
+	config.ClientID = strings.TrimSpace(config.ClientID)
+	config.ClientSecret = strings.TrimSpace(config.ClientSecret)
 	return config
 }
 

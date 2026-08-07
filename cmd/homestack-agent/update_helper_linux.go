@@ -32,7 +32,7 @@ func runUpdateHelper(arguments []string) error {
 		return err
 	}
 	parsedHealth, err := url.Parse(*healthURL)
-	if err != nil || parsedHealth.Scheme != "https" || parsedHealth.Hostname() == "" || parsedHealth.Path != "/api/v1/health" {
+	if err != nil || parsedHealth.Scheme != "https" || parsedHealth.Hostname() == "" || parsedHealth.Path != "/api/health" {
 		return errors.New("Agent 更新健康检查地址无效")
 	}
 	if *parentPID <= 1 {

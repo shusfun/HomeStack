@@ -2,9 +2,9 @@ package control
 
 import (
 	"context"
-	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -14,49 +14,44 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/wangshangbin/homestack/internal/agent"
-	"github.com/wangshangbin/homestack/internal/invite"
-	"github.com/wangshangbin/homestack/internal/maintenance"
+	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/wangshangbin/homestack/internal/protocol"
 	"github.com/wangshangbin/homestack/internal/secure"
 	setupapi "github.com/wangshangbin/homestack/internal/setup"
+	"golang.org/x/oauth2"
 )
 
 type ServerOptions struct {
 	Authenticator Authenticator
 	Owners        *OwnerStore
-	Invites       *invite.Store
 	Devices       *DeviceStore
-	Headscale     Headscale
-	Maintenance   maintenance.Helper
+	Activations   *ActivationStore
+	Registration  *RegistrationService
+	ConfigHelper  setupapi.ConfigHelper
 	SigningKey    ed25519.PrivateKey
 	SigningKeyID  string
 	PublicURL     string
-	HeadscaleURL  string
 	Now           func() time.Time
 	Random        io.Reader
 }
 
 type Server struct {
-	authenticator Authenticator
-	owners        *OwnerStore
-	invites       *invite.Store
-	devices       *DeviceStore
-	headscale     Headscale
-	maintenance   maintenance.Helper
-	signingKey    ed25519.PrivateKey
-	signingKeyID  string
-	publicURL     string
-	headscaleURL  string
-	now           func() time.Time
-	random        io.Reader
-}
-
-type createInviteResponse struct {
-	JoinInfo  string    `json:"join_info"`
-	ExpiresAt time.Time `json:"expires_at"`
+	authenticator    Authenticator
+	owners           *OwnerStore
+	devices          *DeviceStore
+	activations      *ActivationStore
+	registration     *RegistrationService
+	configHelper     setupapi.ConfigHelper
+	signingKey       ed25519.PrivateKey
+	signingKeyID     string
+	publicURL        string
+	now              func() time.Time
+	random           io.Reader
+	switchMu         sync.Mutex
+	providerSwitches map[string]pendingProviderSwitch
 }
 
 type ticketResponse struct {
@@ -64,19 +59,36 @@ type ticketResponse struct {
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
+type appTokenIssuer interface {
+	IssueAppTokens(string) (AppTokens, error)
+}
+
+type pendingProviderSwitch struct {
+	OwnerID   string
+	Provider  *OAuthProvider
+	Config    setupapi.Configuration
+	Verifier  string
+	Nonce     string
+	ExpiresAt time.Time
+}
+
+type reauthAuthorizer interface {
+	ConsumeReauth(*http.Request, string) bool
+}
+
 func NewServer(options ServerOptions) (*Server, error) {
-	if options.Authenticator == nil || options.Owners == nil || options.Invites == nil || options.Devices == nil || options.Headscale == nil {
+	if options.Authenticator == nil || options.Owners == nil || options.Devices == nil {
 		return nil, errors.New("Control 依赖未完整配置")
+	}
+	if len(options.Authenticator.Metadata()) != 1 {
+		return nil, errors.New("Control 必须且只能配置一个 OAuth 登录方式")
 	}
 	if len(options.SigningKey) != ed25519.PrivateKeySize || options.SigningKeyID == "" {
 		return nil, errors.New("Control Ed25519 签名密钥配置无效")
 	}
-	for name, raw := range map[string]string{"public_url": options.PublicURL, "headscale_url": options.HeadscaleURL} {
-		parsed, err := url.Parse(raw)
-		if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil ||
-			(parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" {
-			return nil, fmt.Errorf("%s 必须是无凭据、无路径的有效 HTTPS 地址", name)
-		}
+	parsed, err := url.Parse(options.PublicURL)
+	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil || (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return nil, errors.New("public_url 必须是无凭据、无路径的有效 HTTPS 地址")
 	}
 	if options.Now == nil {
 		options.Now = time.Now
@@ -84,76 +96,66 @@ func NewServer(options ServerOptions) (*Server, error) {
 	if options.Random == nil {
 		options.Random = rand.Reader
 	}
-	return &Server{
-		authenticator: options.Authenticator, owners: options.Owners, invites: options.Invites, devices: options.Devices, headscale: options.Headscale,
-		signingKey: options.SigningKey, signingKeyID: options.SigningKeyID, publicURL: options.PublicURL,
-		headscaleURL: options.HeadscaleURL, maintenance: options.Maintenance, now: options.Now, random: options.Random,
-	}, nil
+	if options.Activations == nil {
+		options.Activations, err = OpenActivationStore("", options.Now, options.Random)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if options.Registration == nil {
+		options.Registration, err = NewRegistrationService(options.Devices, options.SigningKey, options.SigningKeyID, options.PublicURL, options.Now, options.Random)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return &Server{authenticator: options.Authenticator, owners: options.Owners, devices: options.Devices, activations: options.Activations, registration: options.Registration, configHelper: options.ConfigHelper, signingKey: options.SigningKey, signingKeyID: options.SigningKeyID, publicURL: strings.TrimRight(options.PublicURL, "/"), now: options.Now, random: options.Random, providerSwitches: map[string]pendingProviderSwitch{}}, nil
 }
 
 func (s *Server) Handler(static http.Handler) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /api/v1/setup/status", setupLocked)
-	mux.HandleFunc("POST /api/v1/setup/session", setupLocked)
-	mux.HandleFunc("POST /api/v1/setup/prepare", setupLocked)
-	mux.HandleFunc("POST /api/v1/setup/finalize", setupLocked)
-	mux.HandleFunc("GET /api/v1/health", s.health)
+	mux.HandleFunc("GET /api/setup/status", setupLocked)
+	mux.HandleFunc("POST /api/setup/session", setupLocked)
+	mux.HandleFunc("POST /api/setup/prepare", setupLocked)
+	mux.HandleFunc("POST /api/setup/finalize", setupLocked)
+	mux.HandleFunc("GET /api/health", s.health)
 	if webAuth, ok := s.authenticator.(WebAuthenticator); ok {
 		webAuth.RegisterRoutes(mux)
 	}
-	mux.HandleFunc("GET /api/v1/meta", s.meta)
-	mux.HandleFunc("GET /api/v1/system/config", s.systemConfiguration)
-	mux.HandleFunc("GET /api/v1/system/reconfigure/status", s.reconfigureStatus)
-	mux.HandleFunc("POST /api/v1/system/reconfigure", s.reconfigure)
-	mux.HandleFunc("GET /api/v1/me", s.me)
-	mux.HandleFunc("POST /api/v1/device-enrollments", s.createEnrollment)
-	mux.HandleFunc("POST /api/v1/tailnet/auth-keys", s.createTailnetAuthKey)
-	mux.HandleFunc("POST /api/v1/join/exchange", s.exchangeJoin)
-	mux.HandleFunc("GET /api/v1/devices", s.listDevices)
-	mux.HandleFunc("POST /api/v1/devices/{deviceID}/tickets", s.createTicket)
+	mux.HandleFunc("GET /api/meta", s.meta)
+	mux.HandleFunc("GET /api/me", s.me)
+	mux.HandleFunc("GET /api/system/config", s.systemConfig)
+	mux.HandleFunc("POST /api/system/reconfigure", s.reconfigure)
+	mux.HandleFunc("POST /api/system/provider-switch", s.startProviderSwitch)
+	mux.HandleFunc("GET /auth/provider-switch/callback/{provider}", s.completeProviderSwitch)
+	mux.HandleFunc("POST /api/device-activations", s.createActivation)
+	mux.HandleFunc("POST /api/auth/app/activate", s.activateApp)
+	mux.HandleFunc("POST /api/devices/register", s.registerDevice)
+	mux.HandleFunc("GET /api/devices", s.listDevices)
+	mux.HandleFunc("DELETE /api/devices/{deviceID}", s.removeDevice)
+	mux.HandleFunc("POST /api/devices/{deviceID}/tickets", s.createTicket)
 	mux.HandleFunc("GET /devices/{deviceID}/open", s.openDevice)
-	mux.HandleFunc("PUT /api/v1/devices/{deviceID}/status", s.updateStatus)
-	mux.HandleFunc("GET /api/v1/device/config", s.getDeviceConfig)
+	mux.HandleFunc("PUT /api/devices/{deviceID}/status", s.updateStatus)
+	mux.HandleFunc("GET /api/device/config", s.getDeviceConfig)
 	if static != nil {
 		mux.Handle("/", static)
 	}
 	return securityHeaders(mux)
 }
 
-func setupLocked(writer http.ResponseWriter, _ *http.Request) {
-	writeControlError(writer, http.StatusLocked, "setup_locked", "Setup 已完成并永久锁定")
-}
-
-func (s *Server) systemConfiguration(writer http.ResponseWriter, request *http.Request) {
+func (s *Server) systemConfig(writer http.ResponseWriter, request *http.Request) {
 	if _, ok := s.requireIdentity(writer, request); !ok {
 		return
 	}
-	if s.maintenance == nil {
-		writeControlError(writer, http.StatusServiceUnavailable, "maintenance_unavailable", "维护 Helper 未配置")
+	if s.configHelper == nil {
+		writeControlError(writer, http.StatusServiceUnavailable, "config_helper_unavailable", "Config Helper 未配置")
 		return
 	}
-	config, err := s.maintenance.Configuration(request.Context())
+	config, err := s.configHelper.Configuration(request.Context())
 	if err != nil {
-		writeControlError(writer, http.StatusBadGateway, "maintenance_failed", err.Error())
+		writeControlError(writer, http.StatusBadGateway, "config_failed", err.Error())
 		return
 	}
 	writeJSON(writer, http.StatusOK, config)
-}
-
-func (s *Server) reconfigureStatus(writer http.ResponseWriter, request *http.Request) {
-	if _, ok := s.requireIdentity(writer, request); !ok {
-		return
-	}
-	if s.maintenance == nil {
-		writeControlError(writer, http.StatusServiceUnavailable, "maintenance_unavailable", "维护 Helper 未配置")
-		return
-	}
-	status, err := s.maintenance.Status(request.Context())
-	if err != nil {
-		writeControlError(writer, http.StatusBadGateway, "maintenance_failed", err.Error())
-		return
-	}
-	writeJSON(writer, http.StatusOK, status)
 }
 
 func (s *Server) reconfigure(writer http.ResponseWriter, request *http.Request) {
@@ -162,61 +164,248 @@ func (s *Server) reconfigure(writer http.ResponseWriter, request *http.Request) 
 		return
 	}
 	if request.Header.Get("Authorization") != "" || !s.validWriteOrigin(request) {
-		writeControlError(writer, http.StatusForbidden, "origin_rejected", "域名迁移只接受当前 Control 浏览器会话")
+		writeControlError(writer, http.StatusForbidden, "origin_rejected", "域名迁移只接受当前浏览器会话")
 		return
 	}
-	authorizer, ok := s.authenticator.(MaintenanceAuthorizer)
-	if !ok || !authorizer.ConsumeMaintenanceGrant(request, identity.Subject) {
-		writeControlError(writer, http.StatusForbidden, "reauthentication_required", "域名迁移需要重新使用 Pocket ID Passkey 认证")
+	authorizer, ok := s.authenticator.(reauthAuthorizer)
+	if !ok || !authorizer.ConsumeReauth(request, identity.Subject) {
+		writeControlError(writer, http.StatusForbidden, "reauthentication_required", "域名迁移需要重新认证")
+		return
+	}
+	if s.configHelper == nil {
+		writeControlError(writer, http.StatusServiceUnavailable, "config_helper_unavailable", "Config Helper 未配置")
 		return
 	}
 	var body struct {
-		maintenance.Configuration
+		PublicHost   string `json:"public_host"`
 		Confirmation string `json:"confirmation"`
 	}
 	if err := decodeJSONBody(writer, request, &body); err != nil {
 		writeControlError(writer, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	body.ControlHost = strings.ToLower(strings.TrimSpace(body.ControlHost))
-	body.PocketHost = strings.ToLower(strings.TrimSpace(body.PocketHost))
-	body.MeshHost = strings.ToLower(strings.TrimSpace(body.MeshHost))
-	body.TailHost = strings.ToLower(strings.TrimSpace(body.TailHost))
-	body.PublicIPv4 = strings.TrimSpace(body.PublicIPv4)
-	if err := setupapi.ValidateConfiguration(body.Configuration); err != nil {
+	body.PublicHost = strings.ToLower(strings.TrimSpace(body.PublicHost))
+	if body.Confirmation != body.PublicHost {
+		writeControlError(writer, http.StatusBadRequest, "confirmation_mismatch", "确认文本必须与新域名一致")
+		return
+	}
+	current, err := s.configHelper.Configuration(request.Context())
+	if err != nil {
+		writeControlError(writer, http.StatusBadGateway, "config_failed", err.Error())
+		return
+	}
+	config := setupapi.Configuration{PublicHost: body.PublicHost, Provider: current.Provider, ClientID: current.ClientID, ClientSecret: "preserved-by-helper"}
+	if err := setupapi.ValidateConfiguration(config); err != nil {
 		writeControlError(writer, http.StatusBadRequest, "invalid_configuration", err.Error())
 		return
 	}
-	if strings.TrimSpace(body.Confirmation) != body.ControlHost {
-		writeControlError(writer, http.StatusBadRequest, "confirmation_mismatch", "确认文本必须与新的 Control 域名完全一致")
+	if err := preflightControlDomain(request.Context(), body.PublicHost); err != nil {
+		writeControlError(writer, http.StatusBadRequest, "preflight_failed", err.Error())
 		return
 	}
-	if s.maintenance == nil {
-		writeControlError(writer, http.StatusServiceUnavailable, "maintenance_unavailable", "维护 Helper 未配置")
-		return
-	}
-	status, err := s.maintenance.Reconfigure(request.Context(), body.Configuration)
+	config.ClientSecret = ""
+	status, err := s.configHelper.Reconfigure(request.Context(), config)
 	if err != nil {
 		writeControlError(writer, http.StatusBadGateway, "reconfigure_failed", err.Error())
 		return
 	}
-	writeJSON(writer, http.StatusAccepted, status)
+	newURL := "https://" + body.PublicHost
+	if err := s.devices.UpdateControlURL(newURL, s.now().UTC(), func(deviceConfig protocol.SignedDeviceConfig) (string, error) {
+		return secure.SignJWS(s.signingKey, s.signingKeyID, deviceConfig)
+	}); err != nil {
+		rollback := setupapi.Configuration{PublicHost: current.PublicHost, Provider: current.Provider, ClientID: current.ClientID}
+		_, rollbackErr := s.configHelper.Reconfigure(request.Context(), rollback)
+		if rollbackErr != nil {
+			err = fmt.Errorf("%v；恢复旧域名失败: %w", err, rollbackErr)
+		}
+		writeControlError(writer, http.StatusInternalServerError, "device_config_failed", err.Error())
+		return
+	}
+	if err := s.owners.RevokeAllSessions(); err != nil {
+		writeControlError(writer, http.StatusInternalServerError, "session_revoke_failed", err.Error())
+		return
+	}
+	writeJSON(writer, http.StatusAccepted, map[string]any{"status": status, "target_url": newURL})
+}
+
+func (s *Server) startProviderSwitch(writer http.ResponseWriter, request *http.Request) {
+	identity, ok := s.requireIdentity(writer, request)
+	if !ok {
+		return
+	}
+	if request.Header.Get("Authorization") != "" || !s.validWriteOrigin(request) {
+		writeControlError(writer, http.StatusForbidden, "origin_rejected", "登录源切换只接受当前浏览器会话")
+		return
+	}
+	authorizer, ok := s.authenticator.(reauthAuthorizer)
+	if !ok || !authorizer.ConsumeReauth(request, identity.Subject) {
+		writeControlError(writer, http.StatusForbidden, "reauthentication_required", "登录源切换需要先用当前登录方式重新认证")
+		return
+	}
+	if s.configHelper == nil {
+		writeControlError(writer, http.StatusServiceUnavailable, "config_helper_unavailable", "Config Helper 未配置")
+		return
+	}
+	var body struct {
+		Provider     string `json:"provider"`
+		ClientID     string `json:"client_id"`
+		ClientSecret string `json:"client_secret"`
+		Confirmation string `json:"confirmation"`
+	}
+	if err := decodeJSONBody(writer, request, &body); err != nil {
+		writeControlError(writer, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	body.Provider, body.ClientID, body.ClientSecret = strings.ToLower(strings.TrimSpace(body.Provider)), strings.TrimSpace(body.ClientID), strings.TrimSpace(body.ClientSecret)
+	current, err := s.configHelper.Configuration(request.Context())
+	if err != nil {
+		writeControlError(writer, http.StatusBadGateway, "config_failed", err.Error())
+		return
+	}
+	if body.Provider == current.Provider {
+		writeControlError(writer, http.StatusBadRequest, "provider_unchanged", "新登录源必须与当前登录源不同")
+		return
+	}
+	if body.Confirmation != body.Provider {
+		writeControlError(writer, http.StatusBadRequest, "confirmation_mismatch", "确认文本必须与新登录源 ID 一致")
+		return
+	}
+	config := setupapi.Configuration{PublicHost: current.PublicHost, Provider: body.Provider, ClientID: body.ClientID, ClientSecret: body.ClientSecret}
+	if err := setupapi.ValidateConfiguration(config); err != nil {
+		writeControlError(writer, http.StatusBadRequest, "invalid_configuration", err.Error())
+		return
+	}
+	var provider *OAuthProvider
+	if body.Provider == "google" {
+		provider, err = NewOIDCProvider(request.Context(), "google", "Google", "https://accounts.google.com", body.ClientID, body.ClientSecret, s.publicURL)
+	} else {
+		provider, err = NewGitHubProvider(body.ClientID, body.ClientSecret, s.publicURL)
+	}
+	if err != nil {
+		writeControlError(writer, http.StatusBadGateway, "provider_failed", err.Error())
+		return
+	}
+	provider.OAuth.RedirectURL = s.publicURL + "/auth/provider-switch/callback/" + provider.ID
+	state, err := randomToken(s.random, 32)
+	if err != nil {
+		writeControlError(writer, http.StatusInternalServerError, "random_failed", err.Error())
+		return
+	}
+	verifier, err := randomToken(s.random, 64)
+	if err != nil {
+		writeControlError(writer, http.StatusInternalServerError, "random_failed", err.Error())
+		return
+	}
+	nonce, err := randomToken(s.random, 32)
+	if err != nil {
+		writeControlError(writer, http.StatusInternalServerError, "random_failed", err.Error())
+		return
+	}
+	s.switchMu.Lock()
+	for key, pending := range s.providerSwitches {
+		if !s.now().UTC().Before(pending.ExpiresAt) {
+			delete(s.providerSwitches, key)
+		}
+	}
+	s.providerSwitches[state] = pendingProviderSwitch{OwnerID: identity.Subject, Provider: provider, Config: config, Verifier: verifier, Nonce: nonce, ExpiresAt: s.now().UTC().Add(5 * time.Minute)}
+	s.switchMu.Unlock()
+	digest := sha256.Sum256([]byte(verifier))
+	options := []oauth2.AuthCodeOption{oauth2.SetAuthURLParam("code_challenge", base64.RawURLEncoding.EncodeToString(digest[:])), oauth2.SetAuthURLParam("code_challenge_method", "S256"), oauth2.SetAuthURLParam("prompt", "login")}
+	if provider.Kind == "oidc" {
+		options = append(options, oidc.Nonce(nonce))
+	}
+	writeJSON(writer, http.StatusAccepted, map[string]string{"authorization_url": provider.OAuth.AuthCodeURL(state, options...)})
+}
+
+func (s *Server) completeProviderSwitch(writer http.ResponseWriter, request *http.Request) {
+	state := request.URL.Query().Get("state")
+	s.switchMu.Lock()
+	pending, ok := s.providerSwitches[state]
+	delete(s.providerSwitches, state)
+	s.switchMu.Unlock()
+	if !ok || !s.now().UTC().Before(pending.ExpiresAt) || pending.Provider == nil || pending.Provider.ID != request.PathValue("provider") {
+		http.Error(writer, "登录源切换状态无效或已过期", http.StatusBadRequest)
+		return
+	}
+	identity, err := s.authenticator.Authenticate(request.Context(), request)
+	if err != nil || identity.Subject != pending.OwnerID {
+		http.Error(writer, "登录源切换缺少当前 Owner 会话", http.StatusUnauthorized)
+		return
+	}
+	if message := request.URL.Query().Get("error"); message != "" {
+		http.Error(writer, "新登录源拒绝授权: "+message, http.StatusUnauthorized)
+		return
+	}
+	token, err := pending.Provider.OAuth.Exchange(request.Context(), request.URL.Query().Get("code"), oauth2.SetAuthURLParam("code_verifier", pending.Verifier))
+	if err != nil {
+		http.Error(writer, "兑换新登录源授权码失败: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	external, err := pending.Provider.externalIdentity(request.Context(), token, pending.Nonce)
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusUnauthorized)
+		return
+	}
+	previous, err := s.owners.ReplaceIdentity(pending.OwnerID, external)
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if _, err := s.configHelper.Reconfigure(request.Context(), pending.Config); err != nil {
+		if restoreErr := s.owners.RestoreOwner(previous); restoreErr != nil {
+			err = fmt.Errorf("%v；恢复 Owner 身份失败: %w", err, restoreErr)
+		}
+		http.Error(writer, err.Error(), http.StatusBadGateway)
+		return
+	}
+	if err := s.owners.RevokeAllSessions(); err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(writer, request, "/?provider_switch="+url.QueryEscape(pending.Provider.ID), http.StatusSeeOther)
+}
+
+func preflightControlDomain(ctx context.Context, host string) error {
+	addresses, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+	if err != nil {
+		return fmt.Errorf("解析新域名失败: %w", err)
+	}
+	public := false
+	for _, address := range addresses {
+		if address.IsGlobalUnicast() && !address.IsPrivate() {
+			public = true
+			break
+		}
+	}
+	if !public {
+		return errors.New("新域名未解析到公网地址")
+	}
+	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+host+"/api/health", nil)
+	client := &http.Client{Timeout: 10 * time.Second}
+	response, err := client.Do(request)
+	if err != nil {
+		return fmt.Errorf("新域名 TLS 或反向代理检查失败: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("新域名健康检查返回 HTTP %d", response.StatusCode)
+	}
+	return nil
+}
+
+func setupLocked(writer http.ResponseWriter, _ *http.Request) {
+	writeControlError(writer, http.StatusLocked, "setup_locked", "Setup 已完成并永久锁定")
 }
 
 func (s *Server) health(writer http.ResponseWriter, _ *http.Request) {
-	writeJSON(writer, http.StatusOK, map[string]string{"status": "ok", "version": "v1"})
+	writeJSON(writer, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (s *Server) meta(writer http.ResponseWriter, _ *http.Request) {
 	writeJSON(writer, http.StatusOK, map[string]any{
-		"version":            "v1",
-		"providers":          s.authenticator.Metadata(),
-		"signing_key_id":     s.signingKeyID,
+		"surface": "control", "providers": s.authenticator.Metadata(), "signing_key_id": s.signingKeyID,
 		"signing_public_key": base64.RawURLEncoding.EncodeToString(s.signingKey.Public().(ed25519.PublicKey)),
-		"components": map[string]string{
-			"wails": "3.0.0-beta.4", "headscale": "0.29.3", "tailscale": "1.102.2", "pocket_id": "2.12.0",
-			"filebrowser": "0.3.5", "jellyfin": "10.11.11", "cc_connect": "1.4.1",
-		},
+		"node":               map[string]any{"backend": "127.0.0.1:19444", "serve_port": 19443},
 	})
 }
 
@@ -230,12 +419,10 @@ func (s *Server) me(writer http.ResponseWriter, request *http.Request) {
 		writeControlError(writer, http.StatusUnauthorized, "owner_missing", "当前所有者不存在")
 		return
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{
-		"subject": identity.Subject, "email": identity.Email, "name": identity.Name, "identities": owner.Identities,
-	})
+	writeJSON(writer, http.StatusOK, map[string]any{"subject": identity.Subject, "email": identity.Email, "name": identity.Name, "identities": owner.Identities})
 }
 
-func (s *Server) createEnrollment(writer http.ResponseWriter, request *http.Request) {
+func (s *Server) createActivation(writer http.ResponseWriter, request *http.Request) {
 	identity, ok := s.requireIdentity(writer, request)
 	if !ok {
 		return
@@ -244,144 +431,66 @@ func (s *Server) createEnrollment(writer http.ResponseWriter, request *http.Requ
 		writeControlError(writer, http.StatusForbidden, "origin_rejected", "请求来源与 Control 地址不匹配")
 		return
 	}
-	var policy protocol.JoinPolicyV1
-	if err := decodeJSONBody(writer, request, &policy); err != nil {
-		writeControlError(writer, http.StatusBadRequest, "invalid_request", err.Error())
-		return
-	}
-	if err := validateJoinPolicy(policy); err != nil {
-		writeControlError(writer, http.StatusBadRequest, "invalid_policy", err.Error())
-		return
-	}
-	payload, err := json.Marshal(policy)
+	code, expiresAt, err := s.activations.Create(identity.Subject)
 	if err != nil {
-		writeControlError(writer, http.StatusInternalServerError, "encode_failed", err.Error())
-		return
-	}
-	descriptor, record, err := s.invites.Create(s.publicURL, identity.Subject, 10*time.Minute, payload)
-	if err != nil {
-		writeControlError(writer, http.StatusInternalServerError, "enrollment_failed", err.Error())
-		return
-	}
-	writeJSON(writer, http.StatusCreated, createInviteResponse{JoinInfo: descriptor.String(), ExpiresAt: record.ExpiresAt})
-}
-
-func (s *Server) createTailnetAuthKey(writer http.ResponseWriter, request *http.Request) {
-	identity, ok := s.requireIdentity(writer, request)
-	if !ok {
-		return
-	}
-	if !s.validWriteOrigin(request) {
-		writeControlError(writer, http.StatusForbidden, "origin_rejected", "请求来源与 Control 地址不匹配")
-		return
-	}
-	authKey, err := s.headscale.CreateSingleUseKey(request.Context(), identity.Email)
-	if err != nil {
-		writeControlError(writer, http.StatusBadGateway, "headscale_failed", err.Error())
-		return
-	}
-	writeJSON(writer, http.StatusCreated, map[string]any{
-		"login_server": s.headscaleURL,
-		"auth_key":     authKey,
-		"expires_at":   s.now().UTC().Add(10 * time.Minute),
-	})
-}
-
-func (s *Server) exchangeJoin(writer http.ResponseWriter, request *http.Request) {
-	var joinRequest protocol.JoinRequestV1
-	if err := decodeJSONBody(writer, request, &joinRequest); err != nil {
-		writeControlError(writer, http.StatusBadRequest, "invalid_request", err.Error())
-		return
-	}
-	if joinRequest.Version != protocol.JoinVersion {
-		writeControlError(writer, http.StatusBadRequest, "unsupported_version", "连接协议版本不受支持")
-		return
-	}
-	if _, err := protocol.NewJoinDescriptor(s.publicURL, joinRequest.Code); err != nil {
-		writeControlError(writer, http.StatusBadRequest, "invalid_code", err.Error())
-		return
-	}
-	publicBytes, err := base64.RawURLEncoding.DecodeString(joinRequest.EncryptionPublicKey)
-	if err != nil {
-		writeControlError(writer, http.StatusBadRequest, "invalid_key", "设备 X25519 公钥编码无效")
-		return
-	}
-	publicKey, err := ecdh.X25519().NewPublicKey(publicBytes)
-	if err != nil {
-		writeControlError(writer, http.StatusBadRequest, "invalid_key", "设备 X25519 公钥无效")
-		return
-	}
-	record, err := s.invites.Redeem(joinRequest.Code)
-	if err != nil {
-		status := http.StatusUnauthorized
-		if errors.Is(err, invite.ErrExpired) || errors.Is(err, invite.ErrUsed) {
-			status = http.StatusGone
+		status := http.StatusInternalServerError
+		if errors.Is(err, ErrActivationExists) {
+			status = http.StatusConflict
 		}
-		writeControlError(writer, status, "invite_rejected", err.Error())
+		writeControlError(writer, status, "activation_failed", err.Error())
 		return
 	}
-	var policy protocol.JoinPolicyV1
-	if err := json.Unmarshal(record.Payload, &policy); err != nil {
-		writeControlError(writer, http.StatusInternalServerError, "policy_failed", "邀请码策略无法解析")
+	writeJSON(writer, http.StatusCreated, map[string]any{"code": code, "expires_at": expiresAt})
+}
+
+func (s *Server) activateApp(writer http.ResponseWriter, request *http.Request) {
+	var body struct {
+		Code string                    `json:"code"`
+		Node protocol.NodeRegistration `json:"node"`
+	}
+	if err := decodeJSONBody(writer, request, &body); err != nil {
+		writeControlError(writer, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	if joinRequest.DeviceName != policy.DeviceName || joinRequest.AgentURL != policy.AgentURL {
-		writeControlError(writer, http.StatusBadRequest, "policy_mismatch", "设备名称或 Agent 地址与配对策略不匹配")
+	ownerID, err := s.activations.Redeem(strings.TrimSpace(body.Code))
+	if err != nil {
+		writeControlError(writer, http.StatusUnauthorized, "activation_rejected", err.Error())
 		return
 	}
-	owner, ok := s.ownerForSubject(record.CreatedBy)
+	registration, err := s.registration.Register(ownerID, body.Node)
+	if err != nil {
+		writeControlError(writer, http.StatusBadRequest, "registration_failed", err.Error())
+		return
+	}
+	issuer, ok := s.authenticator.(appTokenIssuer)
 	if !ok {
-		writeControlError(writer, http.StatusUnauthorized, "owner_missing", "配对码所属的 HomeStack 所有者不存在")
+		writeControlError(writer, http.StatusServiceUnavailable, "app_auth_unavailable", "App 会话签发器未配置")
 		return
 	}
-	authKey, err := s.headscale.CreateSingleUseKey(request.Context(), owner.Email)
+	tokens, err := issuer.IssueAppTokens(ownerID)
 	if err != nil {
-		writeControlError(writer, http.StatusBadGateway, "headscale_failed", err.Error())
+		writeControlError(writer, http.StatusInternalServerError, "token_failed", err.Error())
 		return
 	}
-	deviceID, err := randomToken(s.random, 16)
+	writeJSON(writer, http.StatusCreated, map[string]any{"session": tokens, "registration": registration})
+}
+
+func (s *Server) registerDevice(writer http.ResponseWriter, request *http.Request) {
+	identity, ok := s.requireIdentity(writer, request)
+	if !ok {
+		return
+	}
+	var body protocol.NodeRegistration
+	if err := decodeJSONBody(writer, request, &body); err != nil {
+		writeControlError(writer, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	registered, err := s.registration.Register(identity.Subject, body)
 	if err != nil {
-		writeControlError(writer, http.StatusInternalServerError, "random_failed", err.Error())
+		writeControlError(writer, http.StatusBadRequest, "registration_failed", err.Error())
 		return
 	}
-	deviceToken, err := randomToken(s.random, 32)
-	if err != nil {
-		writeControlError(writer, http.StatusInternalServerError, "random_failed", err.Error())
-		return
-	}
-	now := s.now().UTC()
-	deviceConfig := protocol.SignedDeviceConfigV1{
-		Version: protocol.DeviceConfigVersion, DeviceID: deviceID, DeviceName: policy.DeviceName, Revision: 1, IssuedAt: now, ExpiresAt: now.Add(24 * time.Hour),
-		ControlURL: s.publicURL, AgentURL: policy.AgentURL, Modules: policy.Modules, SharedDirectories: policy.SharedDirectories,
-	}
-	if err := agent.ValidateDeviceConfig(deviceConfig); err != nil {
-		writeControlError(writer, http.StatusInternalServerError, "policy_failed", err.Error())
-		return
-	}
-	signedConfig, err := secure.SignJWS(s.signingKey, s.signingKeyID, deviceConfig)
-	if err != nil {
-		writeControlError(writer, http.StatusInternalServerError, "sign_failed", err.Error())
-		return
-	}
-	credential := protocol.DeviceCredentialV1{
-		Version: protocol.JoinVersion, DeviceID: deviceID, DeviceToken: deviceToken, HeadscaleLoginServer: s.headscaleURL,
-		HeadscaleAuthKey: authKey, ModuleSecrets: policy.ModuleSecrets, ExpiresAt: now.Add(10 * time.Minute),
-	}
-	sealed, err := secure.SealJSON(publicKey, credential)
-	if err != nil {
-		writeControlError(writer, http.StatusInternalServerError, "seal_failed", err.Error())
-		return
-	}
-	if err := s.devices.Add(DeviceRecord{
-		ID: deviceID, Name: policy.DeviceName, OwnerSubject: owner.ID, OwnerEmail: owner.Email, AgentURL: policy.AgentURL,
-		Config: deviceConfig, SignedConfig: signedConfig, CreatedAt: now,
-	}, deviceToken); err != nil {
-		writeControlError(writer, http.StatusInternalServerError, "device_failed", err.Error())
-		return
-	}
-	writeJSON(writer, http.StatusCreated, protocol.JoinResponseV1{
-		Version: protocol.JoinVersion, DeviceID: deviceID, DeviceName: policy.DeviceName, SealedCredential: sealed, SignedConfig: signedConfig,
-	})
+	writeJSON(writer, http.StatusCreated, registered)
 }
 
 func (s *Server) listDevices(writer http.ResponseWriter, request *http.Request) {
@@ -390,6 +499,22 @@ func (s *Server) listDevices(writer http.ResponseWriter, request *http.Request) 
 		return
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"devices": s.devices.List(identity.Subject)})
+}
+
+func (s *Server) removeDevice(writer http.ResponseWriter, request *http.Request) {
+	identity, ok := s.requireIdentity(writer, request)
+	if !ok {
+		return
+	}
+	if !s.validWriteOrigin(request) {
+		writeControlError(writer, http.StatusForbidden, "origin_rejected", "请求来源与 Control 地址不匹配")
+		return
+	}
+	if err := s.devices.Remove(request.PathValue("deviceID"), identity.Subject); err != nil {
+		writeControlError(writer, http.StatusForbidden, "device_denied", err.Error())
+		return
+	}
+	writer.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) createTicket(writer http.ResponseWriter, request *http.Request) {
@@ -417,14 +542,9 @@ func (s *Server) createTicket(writer http.ResponseWriter, request *http.Request)
 func (s *Server) openDevice(writer http.ResponseWriter, request *http.Request) {
 	identity, err := s.authenticator.Authenticate(request.Context(), request)
 	if err != nil {
-		providers := s.authenticator.Metadata()
-		if len(providers) == 0 {
-			http.Error(writer, "Control 未配置登录方式", http.StatusServiceUnavailable)
-			return
-		}
+		provider := s.authenticator.Metadata()[0]
 		returnPath := "/devices/" + url.PathEscape(request.PathValue("deviceID")) + "/open"
-		login := "/auth/login/" + url.PathEscape(providers[0].ID) + "?return=" + url.QueryEscape(returnPath)
-		http.Redirect(writer, request, login, http.StatusSeeOther)
+		http.Redirect(writer, request, "/auth/login/"+url.PathEscape(provider.ID)+"?return="+url.QueryEscape(returnPath), http.StatusSeeOther)
 		return
 	}
 	record, err := s.devices.Owned(request.PathValue("deviceID"), identity.Subject)
@@ -446,17 +566,14 @@ func (s *Server) signedAgentURL(identity Identity, record DeviceRecord) (string,
 		return "", time.Time{}, err
 	}
 	now := s.now().UTC()
-	claims := protocol.AccessTicketClaimsV1{
-		Version: protocol.AccessTicketVersion, Issuer: s.publicURL, Subject: identity.Subject, DeviceID: record.ID,
-		Nonce: nonce, IssuedAt: now, ExpiresAt: now.Add(30 * time.Second),
-	}
+	claims := protocol.AccessTicketClaims{Issuer: s.publicURL, Subject: identity.Subject, DeviceID: record.ID, Nonce: nonce, IssuedAt: now, ExpiresAt: now.Add(30 * time.Second)}
 	ticket, err := secure.SignJWS(s.signingKey, s.signingKeyID, claims)
 	if err != nil {
 		return "", time.Time{}, err
 	}
 	target, err := url.Parse(record.AgentURL)
 	if err != nil {
-		return "", time.Time{}, fmt.Errorf("解析 Agent 地址失败: %w", err)
+		return "", time.Time{}, err
 	}
 	target.Path = "/access"
 	query := target.Query()
@@ -465,31 +582,19 @@ func (s *Server) signedAgentURL(identity Identity, record DeviceRecord) (string,
 	return target.String(), claims.ExpiresAt, nil
 }
 
-func (s *Server) ownerForSubject(subject string) (Owner, bool) {
-	owner, ok := s.owners.Owner()
-	return owner, ok && owner.ID == subject
-}
-
-func (s *Server) validWriteOrigin(request *http.Request) bool {
-	if strings.HasPrefix(request.Header.Get("Authorization"), "Bearer ") {
-		return true
-	}
-	origin := request.Header.Get("Origin")
-	return origin != "" && strings.TrimRight(origin, "/") == strings.TrimRight(s.publicURL, "/")
-}
-
 func (s *Server) updateStatus(writer http.ResponseWriter, request *http.Request) {
 	deviceID := request.PathValue("deviceID")
-	if _, ok := s.requireDevice(writer, request, deviceID); !ok {
+	record, ok := s.requireDevice(writer, request, deviceID)
+	if !ok {
 		return
 	}
-	var status protocol.DeviceStatusV1
+	var status protocol.DeviceStatus
 	if err := decodeJSONBody(writer, request, &status); err != nil {
 		writeControlError(writer, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	if status.Version != protocol.DeviceStatusVersion || status.DeviceID != deviceID {
-		writeControlError(writer, http.StatusBadRequest, "invalid_status", "设备状态版本或设备 ID 不匹配")
+	if status.DeviceID != deviceID || status.TailscaleIP != record.TailscaleIP {
+		writeControlError(writer, http.StatusBadRequest, "invalid_status", "设备状态与登记信息不匹配")
 		return
 	}
 	status.LastSeen = s.now().UTC()
@@ -502,11 +607,10 @@ func (s *Server) updateStatus(writer http.ResponseWriter, request *http.Request)
 
 func (s *Server) getDeviceConfig(writer http.ResponseWriter, request *http.Request) {
 	deviceID := request.URL.Query().Get("device_id")
-	_, ok := s.requireDevice(writer, request, deviceID)
-	if !ok {
+	if _, ok := s.requireDevice(writer, request, deviceID); !ok {
 		return
 	}
-	signed, err := s.devices.RotateConfig(deviceID, s.now().UTC(), func(config protocol.SignedDeviceConfigV1) (string, error) {
+	signed, err := s.devices.RotateConfig(deviceID, s.now().UTC(), func(config protocol.SignedDeviceConfig) (string, error) {
 		return secure.SignJWS(s.signingKey, s.signingKeyID, config)
 	})
 	if err != nil {
@@ -539,98 +643,12 @@ func (s *Server) requireDevice(writer http.ResponseWriter, request *http.Request
 	return record, true
 }
 
-func validateJoinPolicy(policy protocol.JoinPolicyV1) error {
-	if strings.TrimSpace(policy.DeviceName) == "" || len(policy.DeviceName) > 80 {
-		return errors.New("设备名称不能为空且不能超过 80 个字符")
+func (s *Server) validWriteOrigin(request *http.Request) bool {
+	if strings.HasPrefix(request.Header.Get("Authorization"), "Bearer ") {
+		return true
 	}
-	agentURL, err := url.Parse(policy.AgentURL)
-	if err != nil || agentURL.Scheme != "https" || agentURL.Hostname() == "" || agentURL.User != nil ||
-		agentURL.Port() != "9443" || (agentURL.Path != "" && agentURL.Path != "/") || agentURL.RawQuery != "" || agentURL.Fragment != "" {
-		return errors.New("Agent 地址必须是无凭据、无路径的 HTTPS 地址，并明确使用 9443 端口")
-	}
-	config := protocol.SignedDeviceConfigV1{
-		Version: protocol.DeviceConfigVersion, DeviceID: "validation", DeviceName: policy.DeviceName, Revision: 1,
-		IssuedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour), ControlURL: "https://control.invalid:8443", AgentURL: policy.AgentURL,
-		Modules: policy.Modules, SharedDirectories: policy.SharedDirectories,
-	}
-	if err := agent.ValidateDeviceConfig(config); err != nil {
-		return err
-	}
-	return validateModuleSecrets(policy.Modules, policy.ModuleSecrets)
-}
-
-func validateModuleSecrets(modules []protocol.ModuleConfigV1, secrets map[string]map[string]string) error {
-	expected := make(map[string]struct{}, len(modules))
-	for _, module := range modules {
-		moduleKey := agent.ModuleKey(module)
-		if !module.Enabled {
-			if _, exists := secrets[moduleKey]; exists {
-				return fmt.Errorf("已停用模块 %q 不允许携带密钥", moduleKey)
-			}
-			continue
-		}
-		expected[moduleKey] = struct{}{}
-		moduleSecrets, exists := secrets[moduleKey]
-		if !exists {
-			return fmt.Errorf("模块 %q 缺少密钥配置", moduleKey)
-		}
-		var allowed []string
-		switch module.ID {
-		case "filebrowser":
-			allowed = []string{"api_token"}
-		case "jellyfin":
-			allowed = []string{"api_key"}
-		case "cc-connect":
-			allowed = []string{"bot_id", "bot_secret", "allow_from", "admin_from"}
-		}
-		if err := requireExactSecrets(moduleKey, moduleSecrets, allowed); err != nil {
-			return err
-		}
-		if module.ID == "cc-connect" {
-			if err := validateExplicitUsers("allow_from", moduleSecrets["allow_from"]); err != nil {
-				return fmt.Errorf("cc-connect 项目 %q: %w", moduleKey, err)
-			}
-			if err := validateExplicitUsers("admin_from", moduleSecrets["admin_from"]); err != nil {
-				return fmt.Errorf("cc-connect 项目 %q: %w", moduleKey, err)
-			}
-		}
-	}
-	for moduleKey := range secrets {
-		if _, exists := expected[moduleKey]; !exists {
-			return fmt.Errorf("存在未启用模块的密钥配置 %q", moduleKey)
-		}
-	}
-	return nil
-}
-
-func requireExactSecrets(moduleKey string, values map[string]string, allowed []string) error {
-	allowedSet := make(map[string]struct{}, len(allowed))
-	for _, key := range allowed {
-		allowedSet[key] = struct{}{}
-		if strings.TrimSpace(values[key]) == "" {
-			return fmt.Errorf("模块 %q 缺少必填密钥 %q", moduleKey, key)
-		}
-	}
-	for key := range values {
-		if _, exists := allowedSet[key]; !exists {
-			return fmt.Errorf("模块 %q 包含不允许的密钥字段 %q", moduleKey, key)
-		}
-	}
-	return nil
-}
-
-func validateExplicitUsers(field, value string) error {
-	users := strings.Split(value, ",")
-	if len(users) == 0 {
-		return fmt.Errorf("%s 必须明确填写", field)
-	}
-	for _, user := range users {
-		trimmed := strings.TrimSpace(user)
-		if trimmed == "" || trimmed == "*" {
-			return fmt.Errorf("%s 不允许为空或使用通配符", field)
-		}
-	}
-	return nil
+	origin := request.Header.Get("Origin")
+	return origin != "" && strings.TrimRight(origin, "/") == s.publicURL
 }
 
 func decodeJSONBody(writer http.ResponseWriter, request *http.Request, target any) error {
@@ -675,31 +693,22 @@ func securityHeaders(next http.Handler) http.Handler {
 	})
 }
 
-func ServeTLS(ctx context.Context, address, certFile, keyFile string, handler http.Handler) error {
-	return serve(ctx, &http.Server{Addr: address, Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}, certFile, keyFile)
-}
-
 func ServeReverseProxy(ctx context.Context, address string, handler http.Handler) error {
 	host, _, err := net.SplitHostPort(address)
 	if err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() {
 		return errors.New("reverse-proxy 模式必须绑定明确的回环 IP 和端口")
 	}
-	return serve(ctx, &http.Server{Addr: address, Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}, "", "")
+	return serve(ctx, &http.Server{Addr: address, Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute})
 }
 
-func serve(ctx context.Context, server *http.Server, certFile, keyFile string) error {
+func serve(ctx context.Context, server *http.Server) error {
 	go func() {
 		<-ctx.Done()
 		shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_ = server.Shutdown(shutdownContext)
 	}()
-	var err error
-	if certFile != "" || keyFile != "" {
-		err = server.ListenAndServeTLS(certFile, keyFile)
-	} else {
-		err = server.ListenAndServe()
-	}
+	err := server.ListenAndServe()
 	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}

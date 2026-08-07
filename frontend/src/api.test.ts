@@ -15,7 +15,7 @@ describe("detectSurface", () => {
   it("不会把正式 Control 的 Setup 锁定响应识别成 Setup", async () => {
     const fetch = vi.fn()
       .mockResolvedValueOnce(jsonResponse({ error: { code: "setup_locked" } }, 423))
-      .mockResolvedValueOnce(jsonResponse({ version: "v1" }, 200));
+      .mockResolvedValueOnce(jsonResponse({ surface: "control" }, 200));
     vi.stubGlobal("fetch", fetch);
     await expect(detectSurface()).resolves.toBe("control");
     expect(fetch).toHaveBeenCalledTimes(2);

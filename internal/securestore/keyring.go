@@ -2,6 +2,8 @@ package securestore
 
 import (
 	"crypto/ecdh"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -14,10 +16,11 @@ import (
 )
 
 const (
-	serviceName       = "HomeStack"
-	deviceKeyAccount  = "device-x25519-v1"
-	deviceProfileName = "device-profile-v1"
-	appSessionAccount = "app-session-v1"
+	serviceName           = "HomeStack"
+	deviceKeyAccount      = "device-x25519"
+	deviceIdentityAccount = "device-ed25519"
+	deviceProfileName     = "device-profile"
+	appSessionAccount     = "app-session"
 )
 
 type AppSession struct {
@@ -26,6 +29,28 @@ type AppSession struct {
 	AccessExpiresAt  time.Time `json:"access_expires_at"`
 	RefreshToken     string    `json:"refresh_token"`
 	RefreshExpiresAt time.Time `json:"refresh_expires_at"`
+}
+
+func LoadOrCreateDeviceIdentityKey() (ed25519.PrivateKey, error) {
+	encoded, err := keyring.Get(serviceName, deviceIdentityAccount)
+	if err == nil {
+		keyBytes, decodeErr := base64.RawURLEncoding.DecodeString(encoded)
+		if decodeErr != nil || len(keyBytes) != ed25519.PrivateKeySize {
+			return nil, errors.New("系统安全存储中的设备身份密钥无效")
+		}
+		return ed25519.PrivateKey(keyBytes), nil
+	}
+	if !errors.Is(err, keyring.ErrNotFound) {
+		return nil, fmt.Errorf("读取设备身份密钥失败: %w", err)
+	}
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("生成设备身份密钥失败: %w", err)
+	}
+	if err := keyring.Set(serviceName, deviceIdentityAccount, base64.RawURLEncoding.EncodeToString(privateKey)); err != nil {
+		return nil, fmt.Errorf("保存设备身份密钥失败，不允许明文降级: %w", err)
+	}
+	return privateKey, nil
 }
 
 func SaveAppSession(session AppSession) error {
@@ -76,12 +101,12 @@ func DeleteAppSession() error {
 }
 
 type DeviceProfile struct {
-	DeviceID         string                      `json:"device_id"`
-	DeviceName       string                      `json:"device_name"`
-	ControlKeyID     string                      `json:"control_key_id"`
-	ControlPublicKey string                      `json:"control_public_key"`
-	SignedConfig     string                      `json:"signed_config"`
-	Credential       protocol.DeviceCredentialV1 `json:"credential"`
+	DeviceID         string                    `json:"device_id"`
+	DeviceName       string                    `json:"device_name"`
+	ControlKeyID     string                    `json:"control_key_id"`
+	ControlPublicKey string                    `json:"control_public_key"`
+	SignedConfig     string                    `json:"signed_config"`
+	Credential       protocol.DeviceCredential `json:"credential"`
 }
 
 func LoadOrCreateDeviceKey() (*ecdh.PrivateKey, error) {

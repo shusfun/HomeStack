@@ -12,7 +12,7 @@ import (
 )
 
 func TestExpiredConfigBlocksTicketRedemption(t *testing.T) {
-	server := &Server{configStore: &ConfigStore{current: protocol.SignedDeviceConfigV1{
+	server := &Server{configStore: &ConfigStore{current: protocol.SignedDeviceConfig{
 		Revision: 1, ExpiresAt: time.Now().UTC().Add(-time.Minute),
 	}}}
 	request := httptest.NewRequest(http.MethodGet, "/access?ticket=unused", nil)
@@ -24,8 +24,8 @@ func TestExpiredConfigBlocksTicketRedemption(t *testing.T) {
 }
 
 func TestDirectDocumentRedirectsToFixedControlEntryAndAPIReturns401(t *testing.T) {
-	config := protocol.SignedDeviceConfigV1{
-		Revision: 1, ControlURL: "https://control.example.com", AgentURL: "https://nas.example.ts.net:9443",
+	config := protocol.SignedDeviceConfig{
+		Revision: 1, ControlURL: "https://control.example.com", AgentURL: "https://nas.tail-name.ts.net:19443",
 		ExpiresAt: time.Now().UTC().Add(time.Hour),
 	}
 	sessions, err := OpenSessionStore("", "device-1", config.ControlURL, ed25519.PublicKey(make([]byte, ed25519.PublicKeySize)), "control-test")
@@ -45,7 +45,7 @@ func TestDirectDocumentRedirectsToFixedControlEntryAndAPIReturns401(t *testing.T
 		t.Fatalf("文档请求未跳转固定 Control 入口: %d %s", documentResponse.Code, documentResponse.Header().Get("Location"))
 	}
 
-	apiRequest := httptest.NewRequest(http.MethodGet, "/api/v1/status", nil)
+	apiRequest := httptest.NewRequest(http.MethodGet, "/api/status", nil)
 	apiResponse := httptest.NewRecorder()
 	handler.ServeHTTP(apiResponse, apiRequest)
 	if apiResponse.Code != http.StatusUnauthorized || !strings.Contains(apiResponse.Body.String(), "session_required") {
@@ -54,13 +54,13 @@ func TestDirectDocumentRedirectsToFixedControlEntryAndAPIReturns401(t *testing.T
 }
 
 func TestAgentWriteOriginMustMatchConfiguredAgentURL(t *testing.T) {
-	server := &Server{configStore: &ConfigStore{current: protocol.SignedDeviceConfigV1{Revision: 1, AgentURL: "https://nas.example.ts.net:9443"}}}
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/services/jellyfin/actions", nil)
+	server := &Server{configStore: &ConfigStore{current: protocol.SignedDeviceConfig{Revision: 1, AgentURL: "https://nas.tail-name.ts.net:19443"}}}
+	request := httptest.NewRequest(http.MethodPost, "/api/services/jellyfin/actions", nil)
 	request.Header.Set("Origin", "https://evil.example")
 	if server.validWriteOrigin(request) {
 		t.Fatal("跨站 Origin 不应通过 Agent 写操作校验")
 	}
-	request.Header.Set("Origin", "https://nas.example.ts.net:9443")
+	request.Header.Set("Origin", "https://nas.tail-name.ts.net:19443")
 	if !server.validWriteOrigin(request) {
 		t.Fatal("Agent 自身 Origin 应通过写操作校验")
 	}

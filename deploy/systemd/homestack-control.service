@@ -1,14 +1,13 @@
 [Unit]
 Description=HomeStack public control service
-After=network-online.target headscale.service
+After=network-online.target homestack-config-helper.service
 Wants=network-online.target
-Requires=headscale.service
+Requires=homestack-config-helper.service
 
 [Service]
 Type=simple
 User=homestack-control
 Group=homestack-control
-SupplementaryGroups=headscale
 EnvironmentFile=/etc/homestack/control.env
 ExecStart=/usr/local/bin/homestack-control
 Restart=on-failure

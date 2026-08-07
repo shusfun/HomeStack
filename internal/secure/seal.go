@@ -15,7 +15,7 @@ import (
 	"github.com/wangshangbin/homestack/internal/protocol"
 )
 
-const sealedEnvelopeVersion = "homestack.sealed.v1"
+const sealedEnvelopeContext = "homestack.sealed"
 
 func GenerateX25519Key() (*ecdh.PrivateKey, error) {
 	key, err := ecdh.X25519().GenerateKey(rand.Reader)
@@ -25,47 +25,43 @@ func GenerateX25519Key() (*ecdh.PrivateKey, error) {
 	return key, nil
 }
 
-func SealJSON(publicKey *ecdh.PublicKey, value any) (protocol.SealedEnvelopeV1, error) {
+func SealJSON(publicKey *ecdh.PublicKey, value any) (protocol.SealedEnvelope, error) {
 	plaintext, err := jsonMarshal(value)
 	if err != nil {
-		return protocol.SealedEnvelopeV1{}, err
+		return protocol.SealedEnvelope{}, err
 	}
 	ephemeral, err := GenerateX25519Key()
 	if err != nil {
-		return protocol.SealedEnvelopeV1{}, err
+		return protocol.SealedEnvelope{}, err
 	}
 	shared, err := ephemeral.ECDH(publicKey)
 	if err != nil {
-		return protocol.SealedEnvelopeV1{}, fmt.Errorf("计算 X25519 共享密钥失败: %w", err)
+		return protocol.SealedEnvelope{}, fmt.Errorf("计算 X25519 共享密钥失败: %w", err)
 	}
 	ephemeralPublic := ephemeral.PublicKey().Bytes()
 	key := deriveKey(shared, ephemeralPublic)
 	block, err := aes.NewCipher(key)
 	if err != nil {
-		return protocol.SealedEnvelopeV1{}, fmt.Errorf("创建 AES 密钥失败: %w", err)
+		return protocol.SealedEnvelope{}, fmt.Errorf("创建 AES 密钥失败: %w", err)
 	}
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
-		return protocol.SealedEnvelopeV1{}, fmt.Errorf("创建 AES-GCM 失败: %w", err)
+		return protocol.SealedEnvelope{}, fmt.Errorf("创建 AES-GCM 失败: %w", err)
 	}
 	nonce := make([]byte, gcm.NonceSize())
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		return protocol.SealedEnvelopeV1{}, fmt.Errorf("生成封装随机数失败: %w", err)
+		return protocol.SealedEnvelope{}, fmt.Errorf("生成封装随机数失败: %w", err)
 	}
-	aad := append([]byte(sealedEnvelopeVersion+":"), ephemeralPublic...)
+	aad := append([]byte(sealedEnvelopeContext+":"), ephemeralPublic...)
 	ciphertext := gcm.Seal(nil, nonce, plaintext, aad)
-	return protocol.SealedEnvelopeV1{
-		Version:            sealedEnvelopeVersion,
+	return protocol.SealedEnvelope{
 		EphemeralPublicKey: base64.RawURLEncoding.EncodeToString(ephemeralPublic),
 		Nonce:              base64.RawURLEncoding.EncodeToString(nonce),
 		Ciphertext:         base64.RawURLEncoding.EncodeToString(ciphertext),
 	}, nil
 }
 
-func OpenJSON(privateKey *ecdh.PrivateKey, envelope protocol.SealedEnvelopeV1, target any) error {
-	if envelope.Version != sealedEnvelopeVersion {
-		return errors.New("密钥封装版本不受支持")
-	}
+func OpenJSON(privateKey *ecdh.PrivateKey, envelope protocol.SealedEnvelope, target any) error {
 	ephemeralBytes, err := decodeEnvelopePart("临时公钥", envelope.EphemeralPublicKey)
 	if err != nil {
 		return err
@@ -94,7 +90,7 @@ func OpenJSON(privateKey *ecdh.PrivateKey, envelope protocol.SealedEnvelopeV1, t
 	if err != nil {
 		return err
 	}
-	aad := append([]byte(sealedEnvelopeVersion+":"), ephemeralBytes...)
+	aad := append([]byte(sealedEnvelopeContext+":"), ephemeralBytes...)
 	plaintext, err := gcm.Open(nil, nonce, ciphertext, aad)
 	if err != nil {
 		return errors.New("密钥封装认证失败")
@@ -111,7 +107,7 @@ func deriveKey(shared, context []byte) []byte {
 	extract.Write(shared)
 	prk := extract.Sum(nil)
 	expand := hmac.New(sha256.New, prk)
-	expand.Write([]byte("homestack/x25519-aesgcm/v1"))
+	expand.Write([]byte("homestack/x25519-aesgcm"))
 	expand.Write(context)
 	expand.Write([]byte{1})
 	return expand.Sum(nil)

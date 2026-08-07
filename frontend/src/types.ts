@@ -26,13 +26,11 @@ export interface ModuleStatus {
 }
 
 export interface DeviceStatus {
-  version: string;
   device_id: string;
   name: string;
   online: boolean;
-  tailnet_ip?: string;
+  tailscale_ip?: string;
   connection: string;
-  derp_region?: string;
   last_seen: string;
   config_revision: number;
   modules: ModuleStatus[];
@@ -41,6 +39,10 @@ export interface DeviceStatus {
 export interface DeviceView {
   id: string;
   name: string;
+  platform: string;
+  architecture: string;
+  tailscale_ip: string;
+  magic_dns: string;
   agent_url: string;
   created_at: string;
   config: {
@@ -48,7 +50,7 @@ export interface DeviceView {
     shared_directories: Array<{
       id: string;
       name: string;
-      permissions: string[];
+      path: string;
     }>;
   };
   status: DeviceStatus;

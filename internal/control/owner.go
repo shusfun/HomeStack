@@ -97,23 +97,38 @@ func (s *OwnerStore) AuthenticateOrClaim(external ExternalIdentity) (Identity, e
 	return identityForOwner(*s.state.Owner, external), nil
 }
 
-func (s *OwnerStore) Link(ownerID string, external ExternalIdentity) error {
+func (s *OwnerStore) ReplaceIdentity(ownerID string, external ExternalIdentity) (Owner, error) {
 	if err := validateExternalIdentity(external); err != nil {
-		return err
+		return Owner{}, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.state.Owner == nil || s.state.Owner.ID != ownerID {
+		return Owner{}, ErrUnauthenticated
+	}
+	previous := *s.state.Owner
+	previous.Identities = append([]IdentityKey(nil), s.state.Owner.Identities...)
+	s.state.Owner.Identities = []IdentityKey{{Provider: external.Provider, Subject: external.Subject}}
+	s.state.Owner.Email, s.state.Owner.Name = external.Email, external.Name
+	if err := s.saveLocked(); err != nil {
+		*s.state.Owner = previous
+		return Owner{}, err
+	}
+	return previous, nil
+}
+
+func (s *OwnerStore) RestoreOwner(owner Owner) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state.Owner == nil || s.state.Owner.ID != owner.ID {
 		return ErrUnauthenticated
 	}
-	key := IdentityKey{Provider: external.Provider, Subject: external.Subject}
-	if containsIdentity(s.state.Owner.Identities, key) {
-		return nil
-	}
-	previous := append([]IdentityKey(nil), s.state.Owner.Identities...)
-	s.state.Owner.Identities = append(s.state.Owner.Identities, key)
+	current := *s.state.Owner
+	restored := owner
+	restored.Identities = append([]IdentityKey(nil), owner.Identities...)
+	s.state.Owner = &restored
 	if err := s.saveLocked(); err != nil {
-		s.state.Owner.Identities = previous
+		s.state.Owner = &current
 		return err
 	}
 	return nil
@@ -161,6 +176,18 @@ func (s *OwnerStore) RevokeSession(raw string) error {
 	defer s.mu.Unlock()
 	delete(s.state.Sessions, hashAuthToken(raw))
 	return s.saveLocked()
+}
+
+func (s *OwnerStore) RevokeAllSessions() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	previous := s.state.Sessions
+	s.state.Sessions = map[string]authSession{}
+	if err := s.saveLocked(); err != nil {
+		s.state.Sessions = previous
+		return err
+	}
+	return nil
 }
 
 func (s *OwnerStore) Owner() (Owner, bool) {

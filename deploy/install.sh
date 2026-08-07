@@ -16,7 +16,7 @@ HomeStack Linux 安装器
   install.sh control
   install.sh agent
   install.sh upgrade control
-  install.sh agent --version v0.1.3
+  install.sh agent --version v0.2.0
 
 Control 需要 root；Agent 必须以最终使用者身份运行，不能使用 sudo。
 EOF
@@ -146,21 +146,21 @@ chmod 0755 "$binary"
 
 install_control() {
   [[ "$EUID" -eq 0 ]] || fail "安装 Control 必须使用 root，例如 curl ... | sudo bash -s -- control"
-	if [[ "$reset_setup_token" == "true" && -e /var/lib/homestack-setup/completed.json ]]; then
-		fail "Setup 已完成，禁止重置一次性令牌"
-	fi
-	if [[ -e /etc/homestack/signing-private.key && ! -e /etc/homestack/signing-public.key ]] || [[ ! -e /etc/homestack/signing-private.key && -e /etc/homestack/signing-public.key ]]; then
-		fail "Control Ed25519 签名密钥对不完整，拒绝覆盖或重新生成"
-	fi
-	command -v systemctl >/dev/null 2>&1 || fail "系统缺少 systemctl"
-	command -v useradd >/dev/null 2>&1 || fail "系统缺少 useradd"
-	[[ -f "$work_dir/archive/homestack-setup-helper" ]] || fail "Control Release 缺少 homestack-setup-helper"
-	for unit in homestack-control.service homestack-setup.service homestack-setup-helper.service homestack-setup-switch.service homestack-maintenance-helper.service; do
-		[[ -f "$work_dir/archive/deploy/systemd/$unit" ]] || fail "Control Release 缺少 systemd unit: $unit"
-	done
-	for template in deploy/systemd/pocket-id.service deploy/systemd/headscale.service deploy/headscale/config.yaml deploy/headscale/policy.hujson deploy/env/control.env.example; do
-		[[ -f "$work_dir/archive/$template" ]] || fail "Control Release 缺少 Setup 模板: $template"
-	done
+  if [[ "$reset_setup_token" == "true" && -e /var/lib/homestack-setup/completed.json ]]; then
+    fail "Setup 已完成，禁止重置一次性令牌"
+  fi
+  if [[ -e /etc/homestack/control-signing.key && ! -e /etc/homestack/control-signing.pub ]] || [[ ! -e /etc/homestack/control-signing.key && -e /etc/homestack/control-signing.pub ]]; then
+    fail "Control Ed25519 签名密钥对不完整，拒绝覆盖或重新生成"
+  fi
+  command -v systemctl >/dev/null 2>&1 || fail "系统缺少 systemctl"
+  command -v useradd >/dev/null 2>&1 || fail "系统缺少 useradd"
+  [[ -f "$work_dir/archive/homestack-config-helper" ]] || fail "Control Release 缺少 homestack-config-helper"
+  for unit in homestack-control.service homestack-setup.service homestack-config-helper.service homestack-setup-switch.service; do
+    [[ -f "$work_dir/archive/deploy/systemd/$unit" ]] || fail "Control Release 缺少 systemd unit: $unit"
+  done
+  for template in deploy/env/control.env.example; do
+    [[ -f "$work_dir/archive/$template" ]] || fail "Control Release 缺少 Setup 模板: $template"
+  done
 
   local was_active="false"
   if systemctl is-active --quiet homestack-control.service; then
@@ -171,33 +171,21 @@ install_control() {
   if ! id -u homestack-control >/dev/null 2>&1; then
     useradd --system --user-group --home-dir /var/lib/homestack-control --shell /usr/sbin/nologin homestack-control
   fi
-  if ! id -u headscale >/dev/null 2>&1; then
-    useradd --system --user-group --home-dir /var/lib/headscale --shell /usr/sbin/nologin headscale
-  fi
-  if ! id -u pocket-id >/dev/null 2>&1; then
-    useradd --system --user-group --home-dir /var/lib/pocket-id --shell /usr/sbin/nologin pocket-id
-  fi
-  for account in homestack-control headscale pocket-id; do
-    getent group "$account" >/dev/null 2>&1 || fail "系统用户 $account 缺少同名系统组"
-  done
+  getent group homestack-control >/dev/null 2>&1 || fail "系统用户 homestack-control 缺少同名系统组"
 
   install -d -m 0755 "$INSTALL_ROOT"
   install -d -m 0755 "$INSTALL_ROOT/deploy" /usr/local/libexec
   install -d -m 0750 -o homestack-control -g homestack-control /etc/homestack
-  install -d -m 0750 -o pocket-id -g pocket-id /etc/pocket-id /var/lib/pocket-id /var/lib/pocket-id/uploads
-  install -d -m 0750 -o headscale -g headscale /etc/headscale /var/lib/headscale
-  install -d -m 0700 -o root -g root /var/lib/homestack-setup /var/lib/homestack-maintenance
+  install -d -m 0700 -o root -g root /var/lib/homestack-setup
   install -d -m 0750 -o homestack-control -g homestack-control /var/lib/homestack-control
   install -m 0755 "$binary" /usr/local/bin/homestack-control
-  install -m 0755 "$work_dir/archive/homestack-setup-helper" /usr/local/libexec/homestack-setup-helper
+  install -m 0755 "$work_dir/archive/homestack-config-helper" /usr/local/libexec/homestack-config-helper
   cp -R "$work_dir/archive/deploy/." "$INSTALL_ROOT/deploy/"
   install -m 0644 "$work_dir/archive/deploy/systemd/homestack-control.service" /etc/systemd/system/homestack-control.service
   install -m 0644 "$work_dir/archive/deploy/systemd/homestack-setup.service" /etc/systemd/system/homestack-setup.service
   install -m 0644 "$work_dir/archive/deploy/systemd/homestack-setup-switch.service" /etc/systemd/system/homestack-setup-switch.service
-  sed "s/REPLACE_WITH_CONTROL_UID/$(id -u homestack-control)/g" "$work_dir/archive/deploy/systemd/homestack-setup-helper.service" > "$work_dir/homestack-setup-helper.service"
-  install -m 0644 "$work_dir/homestack-setup-helper.service" /etc/systemd/system/homestack-setup-helper.service
-  sed "s/REPLACE_WITH_CONTROL_UID/$(id -u homestack-control)/g" "$work_dir/archive/deploy/systemd/homestack-maintenance-helper.service" > "$work_dir/homestack-maintenance-helper.service"
-  install -m 0644 "$work_dir/homestack-maintenance-helper.service" /etc/systemd/system/homestack-maintenance-helper.service
+  sed "s/REPLACE_WITH_CONTROL_UID/$(id -u homestack-control)/g" "$work_dir/archive/deploy/systemd/homestack-config-helper.service" > "$work_dir/homestack-config-helper.service"
+  install -m 0644 "$work_dir/homestack-config-helper.service" /etc/systemd/system/homestack-config-helper.service
   printf '%s\n' "$version" > "$INSTALL_ROOT/control-version"
 
   local setup_needed="false"
@@ -209,26 +197,20 @@ install_control() {
     if [[ ! -e "$INSTALL_ROOT/control.env.pre-setup" ]]; then
       install -m 0600 /etc/homestack/control.env "$INSTALL_ROOT/control.env.pre-setup"
     fi
-  elif ! grep -q '^HOMESTACK_CONTROL_TRANSPORT=' /etc/homestack/control.env; then
-    {
-      printf '%s\n' 'HOMESTACK_CONTROL_TRANSPORT=tls'
-      cat /etc/homestack/control.env
-    } > "$work_dir/control.env"
-    install -m 0600 "$work_dir/control.env" /etc/homestack/control.env
   fi
   if [[ -e /var/lib/homestack-setup/state.json && ! -e /var/lib/homestack-setup/completed.json ]]; then
     setup_needed="true"
   fi
   chown homestack-control:homestack-control /etc/homestack/control.env
   chmod 0600 /etc/homestack/control.env
-  if [[ ! -e /etc/homestack/signing-private.key && ! -e /etc/homestack/signing-public.key ]]; then
+  if [[ ! -e /etc/homestack/control-signing.key && ! -e /etc/homestack/control-signing.pub ]]; then
     /usr/local/bin/homestack-control keygen \
-      --private /etc/homestack/signing-private.key \
-      --public /etc/homestack/signing-public.key
+      --private /etc/homestack/control-signing.key \
+      --public /etc/homestack/control-signing.pub
   fi
-  chown homestack-control:homestack-control /etc/homestack/signing-private.key /etc/homestack/signing-public.key
-  chmod 0600 /etc/homestack/signing-private.key
-  chmod 0644 /etc/homestack/signing-public.key
+  chown homestack-control:homestack-control /etc/homestack/control-signing.key /etc/homestack/control-signing.pub
+  chmod 0600 /etc/homestack/control-signing.key
+  chmod 0644 /etc/homestack/control-signing.pub
 
   systemctl daemon-reload
   if [[ "$setup_needed" == "true" && ! -e /var/lib/homestack-setup/completed.json ]]; then
@@ -243,10 +225,10 @@ install_control() {
       install -m 0400 -o homestack-control -g homestack-control "$work_dir/setup-token.sha256" /etc/homestack/setup-token.sha256
     fi
     systemctl disable --now homestack-control.service >/dev/null 2>&1 || true
-    systemctl enable homestack-setup-helper.service homestack-setup.service
-    systemctl restart homestack-setup-helper.service
+    systemctl enable homestack-config-helper.service homestack-setup.service
+    systemctl restart homestack-config-helper.service
     systemctl restart homestack-setup.service
-    echo "Setup 端口: http://127.0.0.1:8443"
+    echo "Setup 端口: http://127.0.0.1:18443"
     if [[ -n "$setup_token" ]]; then
       echo "Setup 一次性令牌: $setup_token"
     else
@@ -258,7 +240,7 @@ install_control() {
 
   echo "HomeStack Control $release_tag 已安装。"
   if [[ "$setup_needed" == "true" ]]; then
-    echo "请将宝塔反向代理指向 http://127.0.0.1:8443，然后打开 /setup 完成初始化。"
+    echo "请将宝塔唯一反向代理指向 http://127.0.0.1:18443，然后打开 /setup 完成初始化。"
   else
     echo "现有 Control 配置已保留。"
   fi
@@ -308,7 +290,7 @@ install_agent() {
   fi
 
   echo "HomeStack Agent $release_tag 已安装。"
-  echo "请执行桌面端生成的 enroll 命令，并用 systemd-creds encrypt --uid=self 分别创建 tls.crt 与 tls.key 后再启用用户服务。"
+  echo "请执行：homestack-agent activate --server https://你的域名 --activation-code 激活码，然后启用 homestack-agent 用户服务。"
 }
 
 case "$component" in
