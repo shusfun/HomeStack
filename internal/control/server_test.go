@@ -43,6 +43,28 @@ func TestCompletedControlPermanentlyLocksSetupAPI(t *testing.T) {
 	}
 }
 
+func TestMetaBootstrapsLoginWithoutAuthenticationError(t *testing.T) {
+	server, owner := newTestControlServer(t, time.Now().UTC())
+	authenticated := httptest.NewRecorder()
+	server.Handler(nil).ServeHTTP(authenticated, httptest.NewRequest(http.MethodGet, "/api/meta", nil))
+	if authenticated.Code != http.StatusOK || !strings.Contains(authenticated.Body.String(), owner.Subject) {
+		t.Fatalf("有效会话启动信息错误: %d %s", authenticated.Code, authenticated.Body.String())
+	}
+
+	server.authenticator = testAuthenticator{err: ErrUnauthenticated, providers: []ProviderMetadata{{ID: "github", Label: "GitHub"}}}
+	anonymous := httptest.NewRecorder()
+	server.Handler(nil).ServeHTTP(anonymous, httptest.NewRequest(http.MethodGet, "/api/meta", nil))
+	if anonymous.Code != http.StatusOK || !strings.Contains(anonymous.Body.String(), `"me":null`) || anonymous.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("匿名启动信息错误: %d %s", anonymous.Code, anonymous.Body.String())
+	}
+
+	protected := httptest.NewRecorder()
+	server.Handler(nil).ServeHTTP(protected, httptest.NewRequest(http.MethodGet, "/api/me", nil))
+	if protected.Code != http.StatusUnauthorized {
+		t.Fatalf("受保护的当前用户接口未保持鉴权: %d", protected.Code)
+	}
+}
+
 func TestActivationRegistersNodeAndCannotReplay(t *testing.T) {
 	now := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
 	server, owner := newTestControlServer(t, now)

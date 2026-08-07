@@ -1,31 +1,21 @@
 import type { APIErrorResponse, Surface } from "./types";
 
 export async function detectSurface(): Promise<Surface> {
-  const setup = await probeSurface("/api/setup/status", "setup");
-  if (setup) return "setup";
-  const meta = await probeJSON("/api/meta");
-  if (meta) return "control";
-  const status = await probeJSON("/api/status");
-  if (status) return "agent";
+  const hosted = await probeSurface("/api/meta");
+  if (hosted === "control" || hosted === "agent") return hosted;
+  const setup = await probeSurface("/api/setup/status");
+  if (setup === "setup") return "setup";
   return "desktop";
 }
 
-async function probeSurface(path: string, expected: Surface): Promise<boolean> {
+async function probeSurface(path: string): Promise<Surface | null> {
   try {
     const response = await fetch(path, { credentials: "same-origin" });
-    if (!response.ok || !response.headers.get("content-type")?.includes("application/json")) return false;
-    return ((await response.json()) as { surface?: string }).surface === expected;
+    if (!response.ok || !response.headers.get("content-type")?.includes("application/json")) return null;
+    const surface = ((await response.json()) as { surface?: string }).surface;
+    return surface === "setup" || surface === "control" || surface === "agent" || surface === "desktop" ? surface : null;
   } catch {
-    return false;
-  }
-}
-
-async function probeJSON(path: string): Promise<boolean> {
-  try {
-    const response = await fetch(path, { credentials: "same-origin" });
-    return response.headers.get("content-type")?.includes("application/json") ?? false;
-  } catch {
-    return false;
+    return null;
   }
 }
 

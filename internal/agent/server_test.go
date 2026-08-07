@@ -23,7 +23,7 @@ func TestExpiredConfigBlocksTicketRedemption(t *testing.T) {
 	}
 }
 
-func TestDirectDocumentRedirectsToFixedControlEntryAndAPIReturns401(t *testing.T) {
+func TestDirectDocumentRedirectsAndOnlyMetaIsPublic(t *testing.T) {
 	config := protocol.SignedDeviceConfig{
 		Revision: 1, ControlURL: "https://control.example.com", AgentURL: "https://nas.tail-name.ts.net:19443",
 		ExpiresAt: time.Now().UTC().Add(time.Hour),
@@ -43,6 +43,11 @@ func TestDirectDocumentRedirectsToFixedControlEntryAndAPIReturns401(t *testing.T
 	handler.ServeHTTP(documentResponse, document)
 	if documentResponse.Code != http.StatusSeeOther || documentResponse.Header().Get("Location") != "https://control.example.com/devices/device-1/open" {
 		t.Fatalf("文档请求未跳转固定 Control 入口: %d %s", documentResponse.Code, documentResponse.Header().Get("Location"))
+	}
+	metaResponse := httptest.NewRecorder()
+	handler.ServeHTTP(metaResponse, httptest.NewRequest(http.MethodGet, "/api/meta", nil))
+	if metaResponse.Code != http.StatusOK || !strings.Contains(metaResponse.Body.String(), `"surface":"agent"`) {
+		t.Fatalf("Agent 元数据必须公开 surface: %d %s", metaResponse.Code, metaResponse.Body.String())
 	}
 
 	apiRequest := httptest.NewRequest(http.MethodGet, "/api/status", nil)

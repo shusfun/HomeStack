@@ -2,7 +2,7 @@
 
 | 组件 | 固定版本 | 用途 |
 | --- | --- | --- |
-| HomeStack | `0.2.1` | Control、App 与 Node |
+| HomeStack | `0.2.2` | Control、App 与 Node |
 | Tailscale | `1.102.2` | 官方 Tailnet 与 Serve |
 | Wails | `3.0.0-beta.4` | 桌面应用 |
 | Jellyfin | `10.11.11` | Linux 可选媒体服务 |

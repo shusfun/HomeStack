@@ -12,18 +12,28 @@ describe("formatBytes", () => {
 });
 
 describe("detectSurface", () => {
-  it("不会把正式 Control 的 Setup 锁定响应识别成 Setup", async () => {
-    const fetch = vi.fn()
-      .mockResolvedValueOnce(jsonResponse({ error: { code: "setup_locked" } }, 423))
-      .mockResolvedValueOnce(jsonResponse({ surface: "control" }, 200));
+  it("优先通过成功响应识别正式 Control", async () => {
+    const fetch = vi.fn().mockResolvedValueOnce(jsonResponse({ surface: "control" }, 200));
     vi.stubGlobal("fetch", fetch);
     await expect(detectSurface()).resolves.toBe("control");
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(fetch).toHaveBeenCalledWith("/api/meta", { credentials: "same-origin" });
   });
 
   it("只接受带正确 surface 的成功 Setup 响应", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(jsonResponse({ surface: "setup", phase: "token" }, 200)));
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ error: { code: "not_found" } }, 404))
+      .mockResolvedValueOnce(jsonResponse({ surface: "setup", phase: "token" }, 200));
+    vi.stubGlobal("fetch", fetch);
     await expect(detectSurface()).resolves.toBe("setup");
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("通过公开元数据识别 Agent", async () => {
+    const fetch = vi.fn().mockResolvedValueOnce(jsonResponse({ surface: "agent" }, 200));
+    vi.stubGlobal("fetch", fetch);
+    await expect(detectSurface()).resolves.toBe("agent");
+    expect(fetch).toHaveBeenCalledOnce();
   });
 });
 

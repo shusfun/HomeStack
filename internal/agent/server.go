@@ -106,6 +106,9 @@ func (s *Server) Reload() error {
 func (s *Server) Handler(static http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /access", s.redeemTicket)
+	mux.HandleFunc("GET /api/meta", func(writer http.ResponseWriter, _ *http.Request) {
+		writeAgentJSON(writer, http.StatusOK, map[string]string{"surface": "agent"})
+	})
 	mux.HandleFunc("GET /api/health", func(writer http.ResponseWriter, _ *http.Request) {
 		writeAgentJSON(writer, http.StatusOK, map[string]string{"status": "ok"})
 	})

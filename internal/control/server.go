@@ -54,6 +54,13 @@ type ticketResponse struct {
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
+type currentUserResponse struct {
+	Subject    string        `json:"subject"`
+	Email      string        `json:"email"`
+	Name       string        `json:"name"`
+	Identities []IdentityKey `json:"identities"`
+}
+
 type appTokenIssuer interface {
 	IssueAppTokens(string) (AppTokens, error)
 }
@@ -334,12 +341,20 @@ func (s *Server) health(writer http.ResponseWriter, _ *http.Request) {
 	writeJSON(writer, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-func (s *Server) meta(writer http.ResponseWriter, _ *http.Request) {
-	writeJSON(writer, http.StatusOK, map[string]any{
+func (s *Server) meta(writer http.ResponseWriter, request *http.Request) {
+	payload := map[string]any{
 		"surface": "control", "providers": s.authenticator.Metadata(), "signing_key_id": s.signingKeyID,
 		"signing_public_key": base64.RawURLEncoding.EncodeToString(s.signingKey.Public().(ed25519.PublicKey)),
 		"node":               map[string]any{"backend": "127.0.0.1:19444", "serve_port": 19443},
-	})
+		"me":                 nil,
+	}
+	if identity, err := s.authenticator.Authenticate(request.Context(), request); err == nil {
+		if owner, exists := s.owners.Owner(); exists && owner.ID == identity.Subject {
+			payload["me"] = currentUserResponse{Subject: identity.Subject, Email: identity.Email, Name: identity.Name, Identities: owner.Identities}
+		}
+	}
+	writer.Header().Set("Cache-Control", "no-store")
+	writeJSON(writer, http.StatusOK, payload)
 }
 
 func (s *Server) me(writer http.ResponseWriter, request *http.Request) {
@@ -352,7 +367,7 @@ func (s *Server) me(writer http.ResponseWriter, request *http.Request) {
 		writeControlError(writer, http.StatusUnauthorized, "owner_missing", "当前所有者不存在")
 		return
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{"subject": identity.Subject, "email": identity.Email, "name": identity.Name, "identities": owner.Identities})
+	writeJSON(writer, http.StatusOK, currentUserResponse{Subject: identity.Subject, Email: identity.Email, Name: identity.Name, Identities: owner.Identities})
 }
 
 func (s *Server) createActivation(writer http.ResponseWriter, request *http.Request) {

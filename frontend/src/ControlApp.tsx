@@ -9,6 +9,7 @@ import { CenteredLoader, EmptyState, Feedback, StatusPill, connectionTone, error
 
 interface Me { subject: string; email: string; name: string; identities: { provider: OAuthProviderID; subject: string }[] }
 interface Provider { id: OAuthProviderID; label: string }
+interface ControlMetadata { providers: Provider[]; me: Me | null }
 interface ProviderConfiguration extends Provider { configured: boolean; linked: boolean; client_id: string }
 interface SystemConfiguration { public_host: string; providers: ProviderConfiguration[] }
 
@@ -16,8 +17,8 @@ export function ControlApp() {
   const [me, setMe] = useState<Me | null>(null); const [providers, setProviders] = useState<Provider[]>([]);
   const [checked, setChecked] = useState(false); const [error, setError] = useState("");
   useEffect(() => {
-    Promise.all([api<{ providers: Provider[] }>("/api/meta"), api<Me>("/api/me").catch(() => null)])
-      .then(([meta, identity]) => { setProviders(meta.providers); setMe(identity); }).catch((reason) => setError(errorMessage(reason))).finally(() => setChecked(true));
+    api<ControlMetadata>("/api/meta")
+      .then((meta) => { setProviders(meta.providers); setMe(meta.me); }).catch((reason) => setError(errorMessage(reason))).finally(() => setChecked(true));
   }, []);
   if (!checked) return <CenteredLoader label="验证身份" />;
   if (!me) {
