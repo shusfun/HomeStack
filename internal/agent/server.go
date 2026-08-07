@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -430,20 +431,27 @@ func agentSecurityHeaders(next http.Handler) http.Handler {
 	})
 }
 
-func ServeHTTP(ctx context.Context, address string, handler http.Handler) error {
+func ListenHTTP(address string) (net.Listener, error) {
 	host, port, err := net.SplitHostPort(address)
 	if err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() || port != "19444" {
-		return errors.New("Node 后端必须监听明确的回环地址 19444")
+		return nil, errors.New("Node 后端必须监听明确的回环地址 19444")
 	}
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		return nil, fmt.Errorf("监听 Node 回环端口失败: %w", err)
+	}
+	return listener, nil
+}
+
+func ServeHTTP(ctx context.Context, listener net.Listener, handler http.Handler) error {
 	server := newStreamingServer(handler)
-	server.Addr = address
 	go func() {
 		<-ctx.Done()
 		shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_ = server.Shutdown(shutdownContext)
 	}()
-	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 	return nil

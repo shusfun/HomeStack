@@ -73,6 +73,11 @@ func Run() error {
 	if _, err := tailnet.Status(ctx); err != nil {
 		return err
 	}
+	listener, err := agent.ListenHTTP(settings.address)
+	if err != nil {
+		return err
+	}
+	defer listener.Close()
 	if err := tailnet.EnsureServe(ctx); err != nil {
 		return err
 	}
@@ -104,7 +109,7 @@ func Run() error {
 	}
 	go heartbeatLoop(ctx, controlClient, configStore, server)
 	log.Printf("HomeStack Node 正在监听 %s", settings.address)
-	return agent.ServeHTTP(ctx, settings.address, server.Handler(web.Handler()))
+	return agent.ServeHTTP(ctx, listener, server.Handler(web.Handler()))
 }
 
 func loadDeviceProfile() (securestore.DeviceProfile, error) {

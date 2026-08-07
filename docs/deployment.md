@@ -31,7 +31,7 @@ homestack-agent activate --server https://home.example.com --activation-code <co
 systemctl --user enable --now homestack-agent.service
 ```
 
-Node 后端监听 `127.0.0.1:19444`，Tailscale Serve 使用 `19443`。如果该端口已被其他 Serve 映射或 Funnel 占用，Node 会直接失败，不覆盖现有配置。
+Node 后端监听 `127.0.0.1:19444`，Tailscale Serve 使用 `19443`。Tailnet Owner 首次使用前必须按 Tailscale CLI 给出的官方地址启用 Serve；此操作对整个 Tailnet 只需完成一次。端口已被其他 Serve 映射或 Funnel 占用时，Node 会直接失败，不覆盖现有配置。
 
 手机必须登录同一 Tailnet。公网 Control 只签发访问票据并跳转到设备 MagicDNS，不代理设备内容。
 

@@ -131,6 +131,12 @@ func (s *Service) Session() (SessionStatus, error) {
 	if err != nil {
 		return SessionStatus{}, err
 	}
+	if _, err := securestore.LoadDeviceProfile(); err != nil {
+		return SessionStatus{}, err
+	}
+	if err := RepairNodeAutostart(); err != nil {
+		return SessionStatus{}, err
+	}
 	return SessionStatus{LoggedIn: true, ControlURL: session.ControlURL, ExpiresAt: session.AccessExpiresAt}, nil
 }
 

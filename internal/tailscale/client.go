@@ -6,12 +6,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
 
 const ExpectedVersion = "1.102.2"
+const BinaryEnvironment = "HOMESTACK_TAILSCALE_BINARY"
 
 type Runner func(context.Context, string, ...string) ([]byte, error)
 
@@ -42,11 +46,42 @@ type rawStatus struct {
 }
 
 func New() (*Client, error) {
-	path, err := exec.LookPath("tailscale")
+	path, err := ResolveBinary()
 	if err != nil {
-		return nil, fmt.Errorf("未找到官方 Tailscale 客户端: %w", err)
+		return nil, err
 	}
 	return &Client{Binary: path, Run: runCommand}, nil
+}
+
+func ResolveBinary() (string, error) {
+	binary := strings.TrimSpace(os.Getenv(BinaryEnvironment))
+	if binary != "" && !filepath.IsAbs(binary) {
+		return "", errors.New("HOMESTACK_TAILSCALE_BINARY 必须是绝对路径")
+	}
+	if binary != "" {
+		path, err := exec.LookPath(binary)
+		if err != nil {
+			return "", fmt.Errorf("显式 Tailscale CLI 不可执行: %w", err)
+		}
+		return path, nil
+	}
+	if runtime.GOOS == "darwin" {
+		const appBinary = "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+		if path, err := exec.LookPath(appBinary); err == nil {
+			return path, nil
+		}
+	}
+	if path, err := exec.LookPath("tailscale"); err == nil {
+		return path, nil
+	}
+	if runtime.GOOS == "darwin" {
+		for _, candidate := range []string{"/usr/local/bin/tailscale", "/opt/homebrew/bin/tailscale"} {
+			if path, err := exec.LookPath(candidate); err == nil {
+				return path, nil
+			}
+		}
+	}
+	return "", errors.New("未找到官方 Tailscale CLI")
 }
 
 func (c *Client) VerifyVersion(ctx context.Context) error {
@@ -99,7 +134,9 @@ func (c *Client) Status(ctx context.Context) (Status, error) {
 }
 
 func (c *Client) EnsureServe(ctx context.Context) error {
-	serve, err := c.run(ctx, "serve", "status", "--json")
+	commandCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	serve, err := c.run(commandCtx, "serve", "status", "--json")
 	if err != nil {
 		return fmt.Errorf("读取 Tailscale Serve 配置失败: %w", err)
 	}
@@ -109,7 +146,7 @@ func (c *Client) EnsureServe(ctx context.Context) error {
 			return fmt.Errorf("解析 Tailscale Serve 配置失败: %w", err)
 		}
 	}
-	funnel, err := c.run(ctx, "funnel", "status", "--json")
+	funnel, err := c.run(commandCtx, "funnel", "status", "--json")
 	if err != nil {
 		return fmt.Errorf("读取 Tailscale Funnel 配置失败: %w", err)
 	}
@@ -122,7 +159,7 @@ func (c *Client) EnsureServe(ctx context.Context) error {
 		}
 		return errors.New("Tailscale Serve 端口 19443 已被其他服务占用")
 	}
-	if _, err := c.run(ctx, "serve", "--bg", "--https=19443", "http://127.0.0.1:19444"); err != nil {
+	if _, err := c.run(commandCtx, "serve", "--yes", "--bg", "--https=19443", "http://127.0.0.1:19444"); err != nil {
 		return fmt.Errorf("添加 HomeStack Serve 映射失败: %w", err)
 	}
 	return nil

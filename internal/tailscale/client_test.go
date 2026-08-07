@@ -3,9 +3,32 @@ package tailscale
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 )
+
+func TestNewUsesExplicitAbsoluteBinary(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(BinaryEnvironment, executable)
+	client, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.Binary != executable {
+		t.Fatalf("未使用显式 Tailscale 路径: %s", client.Binary)
+	}
+}
+
+func TestNewRejectsRelativeExplicitBinary(t *testing.T) {
+	t.Setenv(BinaryEnvironment, "tailscale")
+	if _, err := New(); err == nil || !strings.Contains(err.Error(), "绝对路径") {
+		t.Fatalf("相对路径未被拒绝: %v", err)
+	}
+}
 
 func TestStatusRequiresLoggedInMagicDNS(t *testing.T) {
 	client := &Client{Binary: "tailscale", Run: func(_ context.Context, _ string, args ...string) ([]byte, error) {
@@ -33,7 +56,7 @@ func TestEnsureServePreservesConfigurationAndNeverRunsUp(t *testing.T) {
 			return []byte(`{"Web":{"443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:3000"}}}}}`), nil
 		case "funnel status --json":
 			return []byte(`null`), nil
-		case "serve --bg --https=19443 http://127.0.0.1:19444":
+		case "serve --yes --bg --https=19443 http://127.0.0.1:19444":
 			return nil, nil
 		default:
 			return nil, errors.New("意外命令: " + joined)

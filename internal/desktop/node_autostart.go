@@ -1,6 +1,7 @@
 package desktop
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"html"
@@ -10,9 +11,14 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+
+	"github.com/wangshangbin/homestack/internal/tailscale"
 )
 
 const nodeLabel = "dev.homestack.node"
+
+var nodeAutostartMu sync.Mutex
 
 func ConfigureNodeEnvironment() error {
 	stateDir, err := nodeStateDirectory()
@@ -31,6 +37,8 @@ func ConfigureNodeEnvironment() error {
 }
 
 func ConfigureNodeAutostart() error {
+	nodeAutostartMu.Lock()
+	defer nodeAutostartMu.Unlock()
 	executable, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("定位 HomeStack App 失败: %w", err)
@@ -39,9 +47,13 @@ func ConfigureNodeAutostart() error {
 	if err != nil {
 		return err
 	}
+	tailscaleBinary, err := tailscale.ResolveBinary()
+	if err != nil {
+		return err
+	}
 	switch runtime.GOOS {
 	case "darwin":
-		return configureLaunchAgent(executable)
+		return configureLaunchAgent(executable, tailscaleBinary)
 	case "linux":
 		return configureSystemdUser(executable)
 	case "windows":
@@ -51,23 +63,89 @@ func ConfigureNodeAutostart() error {
 	}
 }
 
-func configureLaunchAgent(executable string) error {
+func RepairNodeAutostart() error {
+	if runtime.GOOS != "darwin" {
+		return nil
+	}
+	return ConfigureNodeAutostart()
+}
+
+func configureLaunchAgent(executable, tailscaleBinary string) error {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return err
 	}
 	directory := filepath.Join(home, "Library", "LaunchAgents")
 	path := filepath.Join(directory, nodeLabel+".plist")
-	content := fmt.Sprintf("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"https://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>Label</key><string>%s</string><key>ProgramArguments</key><array><string>%s</string><string>--node</string></array><key>RunAtLoad</key><true/><key>KeepAlive</key><true/></dict></plist>\n", nodeLabel, html.EscapeString(executable))
-	if err := atomicUserFile(path, []byte(content), 0o600); err != nil {
+	stdoutPath, stderrPath, err := prepareNodeLogs(home)
+	if err != nil {
 		return err
+	}
+	content := launchAgentContent(executable, tailscaleBinary, stdoutPath, stderrPath)
+	unchanged, err := sameUserFile(path, content, 0o600)
+	if err != nil {
+		return err
+	}
+	if !unchanged {
+		if err := atomicUserFile(path, content, 0o600); err != nil {
+			return err
+		}
 	}
 	domain := "gui/" + strconv.Itoa(os.Getuid())
 	target := domain + "/" + nodeLabel
 	if exec.Command("launchctl", "print", target).Run() == nil {
-		return runStartupCommand("launchctl", "kickstart", "-k", target)
+		if unchanged {
+			return nil
+		}
+		if err := runStartupCommand("launchctl", "bootout", target); err != nil {
+			return err
+		}
 	}
 	return runStartupCommand("launchctl", "bootstrap", domain, path)
+}
+
+func launchAgentContent(executable, tailscaleBinary, stdoutPath, stderrPath string) []byte {
+	return []byte(fmt.Sprintf("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"https://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>Label</key><string>%s</string><key>ProgramArguments</key><array><string>%s</string><string>--node</string></array><key>EnvironmentVariables</key><dict><key>%s</key><string>%s</string><key>TERM</key><string>xterm-256color</string></dict><key>StandardOutPath</key><string>%s</string><key>StandardErrorPath</key><string>%s</string><key>RunAtLoad</key><true/><key>KeepAlive</key><true/></dict></plist>\n", nodeLabel, html.EscapeString(executable), tailscale.BinaryEnvironment, html.EscapeString(tailscaleBinary), html.EscapeString(stdoutPath), html.EscapeString(stderrPath)))
+}
+
+func prepareNodeLogs(home string) (string, string, error) {
+	directory := filepath.Join(home, "Library", "Logs", "HomeStack")
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return "", "", fmt.Errorf("创建 Node 日志目录失败: %w", err)
+	}
+	if err := os.Chmod(directory, 0o700); err != nil {
+		return "", "", fmt.Errorf("限制 Node 日志目录权限失败: %w", err)
+	}
+	paths := []string{filepath.Join(directory, "node.stdout.log"), filepath.Join(directory, "node.stderr.log")}
+	for _, path := range paths {
+		file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			return "", "", fmt.Errorf("创建 Node 日志失败: %w", err)
+		}
+		if err := file.Chmod(0o600); err != nil {
+			_ = file.Close()
+			return "", "", fmt.Errorf("限制 Node 日志权限失败: %w", err)
+		}
+		if err := file.Close(); err != nil {
+			return "", "", fmt.Errorf("关闭 Node 日志失败: %w", err)
+		}
+	}
+	return paths[0], paths[1], nil
+}
+
+func sameUserFile(path string, expected []byte, mode os.FileMode) (bool, error) {
+	current, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return false, err
+	}
+	return bytes.Equal(current, expected) && info.Mode().Perm() == mode.Perm(), nil
 }
 
 func configureSystemdUser(executable string) error {
