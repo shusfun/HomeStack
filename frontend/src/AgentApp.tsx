@@ -2,6 +2,7 @@ import { Activity, ChevronLeft, Download, File, Film, Folder, FolderOpen, Gauge,
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { NavLink, Route, Routes } from "react-router-dom";
 import { api, formatBytes, formatTime } from "./api";
+import { BrandMark } from "./BrandMark";
 import type { DeviceStatus, FileItem, FileResource, MediaItem } from "./types";
 import { CenteredLoader, EmptyState, Feedback, StatusPill, connectionTone, errorMessage } from "./ui";
 
@@ -20,7 +21,7 @@ const nav = [
 ];
 
 export function AgentApp() {
-  return <div className="agent-shell"><aside><div className="agent-brand"><span className="brand-mark">H</span><div><strong>HomeStack</strong><small>Agent</small></div></div><nav>{nav.map((item) => <NavLink key={item.to} to={item.to} end={item.to === "/"}><item.icon size={17} /><span>{item.label}</span></NavLink>)}</nav></aside><main><Routes><Route path="/" element={<Overview />} /><Route path="/files" element={<Files />} /><Route path="/media" element={<Media />} /><Route path="/services" element={<Services />} /><Route path="/logs" element={<Logs />} /><Route path="/updates" element={<AgentUpdates />} /><Route path="*" element={<Overview />} /></Routes></main></div>;
+  return <div className="agent-shell"><aside><div className="agent-brand"><BrandMark className="brand-mark" /><div><strong>HomeStack</strong><small>Agent</small></div></div><nav>{nav.map((item) => <NavLink key={item.to} to={item.to} end={item.to === "/"}><item.icon size={17} /><span>{item.label}</span></NavLink>)}</nav></aside><main><Routes><Route path="/" element={<Overview />} /><Route path="/files" element={<Files />} /><Route path="/media" element={<Media />} /><Route path="/services" element={<Services />} /><Route path="/logs" element={<Logs />} /><Route path="/updates" element={<AgentUpdates />} /><Route path="*" element={<Overview />} /></Routes></main></div>;
 }
 
 function Overview() {

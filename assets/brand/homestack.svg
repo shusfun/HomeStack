@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title">
+  <title id="title">HomeStack</title>
+  <rect x="80" y="80" width="864" height="864" rx="216" fill="#F8FAFC"/>
+  <g fill="#10B981">
+    <path d="M260 288h104v448H260z"/>
+    <rect x="224" y="208" width="176" height="160" rx="48"/>
+    <rect x="224" y="432" width="176" height="160" rx="48"/>
+    <rect x="224" y="656" width="176" height="160" rx="48"/>
+    <path d="M352 432h160v160H352z"/>
+  </g>
+  <g fill="#2563EB">
+    <path d="M660 288h104v448H660z"/>
+    <rect x="624" y="208" width="176" height="160" rx="48"/>
+    <rect x="624" y="432" width="176" height="160" rx="48"/>
+    <rect x="624" y="656" width="176" height="160" rx="48"/>
+    <path d="M512 432h160v160H512z"/>
+  </g>
+</svg>

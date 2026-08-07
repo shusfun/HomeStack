@@ -2,6 +2,7 @@ import { Call, System, Window } from "@wailsio/runtime";
 import { ArrowLeft, Download, ExternalLink, HardDrive, LogOut, Minus, Network, Plus, RefreshCw, RotateCcw, Settings, Square, Unplug, X } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { NavLink, Route, Routes, useNavigate } from "react-router-dom";
+import { BrandMark } from "./BrandMark";
 import { EnrollmentForm, type EnrollmentPolicy } from "./EnrollmentForm";
 import type { DeviceView } from "./types";
 import { CenteredLoader, EmptyState, Feedback, StatusPill, connectionTone, errorMessage } from "./ui";
@@ -71,7 +72,7 @@ export function DesktopApp() {
 
 function DesktopChrome({ onRefresh, loggedIn, onLogout, updateAvailable }: { onRefresh: () => Promise<void>; loggedIn: boolean; onLogout: () => Promise<void>; updateAvailable: boolean }) {
   return <header className={`desktop-chrome window-drag ${System.IsMac() ? "mac" : ""}`}>
-    <div className="chrome-brand"><span className="brand-mark">H</span><strong>HomeStack</strong></div>
+    <div className="chrome-brand"><BrandMark className="brand-mark" /><strong>HomeStack</strong></div>
     <nav className="window-no-drag chrome-actions">
       {loggedIn && <NavLink className="icon-button" to="/enroll" title="配对 Linux 设备" aria-label="配对 Linux 设备"><Plus size={16} /></NavLink>}
       <button className="icon-button" onClick={() => void onRefresh()} title="刷新" aria-label="刷新"><RefreshCw size={16} /></button>
@@ -96,7 +97,7 @@ function LoginPanel({ onLogin }: { onLogin: () => Promise<void> }) {
     try { await Call.ByName(`${service}.Login`, controlURL.trim(), provider); await onLogin(); }
     catch (reason) { setError(errorMessage(reason)); } finally { setBusy(false); }
   }
-  return <section className="login-panel"><div className="login-mark">H</div><h1>连接 HomeStack</h1><div className="login-controls"><input type="url" value={controlURL} onChange={(event) => setControlURL(event.target.value)} placeholder="https://control.example.com" /><button className="primary-button" disabled={busy || !controlURL} onClick={() => void discover()}>读取登录方式</button></div>{providers.length > 0 && <div className="provider-list">{providers.map((provider) => <button key={provider.id} disabled={busy} onClick={() => void login(provider.id)}>{provider.label}</button>)}</div>}<Feedback error={error} /></section>;
+  return <section className="login-panel"><BrandMark className="login-mark" /><h1>连接 HomeStack</h1><div className="login-controls"><input type="url" value={controlURL} onChange={(event) => setControlURL(event.target.value)} placeholder="https://control.example.com" /><button className="primary-button" disabled={busy || !controlURL} onClick={() => void discover()}>读取登录方式</button></div>{providers.length > 0 && <div className="provider-list">{providers.map((provider) => <button key={provider.id} disabled={busy} onClick={() => void login(provider.id)}>{provider.label}</button>)}</div>}<Feedback error={error} /></section>;
 }
 
 function DeviceList({ devices, tailnet, busy, setBusy, setError, refresh }: { devices: DeviceView[]; tailnet: TailnetStatus | null; busy: boolean; setBusy: (value: boolean) => void; setError: (value: string) => void; refresh: () => Promise<void> }) {

@@ -7,6 +7,7 @@ import (
 	"runtime"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
+	"github.com/wangshangbin/homestack/assets/brand"
 	"github.com/wangshangbin/homestack/internal/buildinfo"
 	"github.com/wangshangbin/homestack/internal/desktop"
 	"github.com/wangshangbin/homestack/internal/web"
@@ -28,6 +29,7 @@ func main() {
 	app := application.New(application.Options{
 		Name:        "HomeStack",
 		Description: "多端 NAS 与远程开发整合器",
+		Icon:        brand.AppIconPNG(),
 		Services: []application.Service{
 			application.NewService(service),
 		},

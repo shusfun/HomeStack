@@ -22,6 +22,16 @@ tasks:
     cmds:
       - GOENV=./go.env go test -p=2 -parallel=2 -tags=contract ./internal/contracts
 
+  assets:icons:sync:
+    desc: 从已确认的 PNG 同步 Windows 与 macOS 图标
+    cmds:
+      - GOENV=./go.env go run ./cmd/homestack-assets icons sync
+
+  assets:icons:verify:
+    desc: 校验品牌资源及平台图标
+    cmds:
+      - GOENV=./go.env go run ./cmd/homestack-assets icons verify
+
   release:check:
     cmds:
       - bash -n ./deploy/install.sh

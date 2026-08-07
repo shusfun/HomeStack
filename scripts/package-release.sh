@@ -30,6 +30,7 @@ fi
 
 repo_root=$(git rev-parse --show-toplevel)
 cd "$repo_root"
+brand_dir="$repo_root/assets/brand"
 version="${release_tag#v}"
 host_os=$(go env GOHOSTOS)
 host_arch=$(go env GOHOSTARCH)
@@ -47,7 +48,19 @@ commit="${GITHUB_SHA:-$(git rev-parse HEAD)}"
 build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 output_dir=$(mkdir -p "$output_dir" && cd "$output_dir" && pwd)
 stage=$(mktemp -d)
-trap 'rm -rf -- "$stage"' EXIT
+repo_temp=""
+cleanup() {
+  [[ -z "$repo_temp" ]] || rm -rf -- "$repo_temp"
+  rm -rf -- "$stage"
+}
+trap cleanup EXIT
+
+require_brand_assets() {
+  local filename
+  for filename in homestack.svg homestack.png homestack.ico homestack.icns; do
+    [[ -s "$brand_dir/$filename" ]] || { echo "缺少品牌资源: assets/brand/$filename" >&2; exit 1; }
+  done
+}
 
 ldflags="-s -w"
 ldflags+=" -X github.com/wangshangbin/homestack/internal/buildinfo.Version=$version"
@@ -93,6 +106,7 @@ package_cli() {
 
 build_desktop() {
   local binary_name="HomeStack"
+  local package_path="${desktop_package:-./cmd/homestack-desktop}"
   if [[ "$target_os" == "windows" ]]; then
     binary_name="HomeStack.exe"
     export CGO_ENABLED=0
@@ -105,7 +119,11 @@ build_desktop() {
     export CGO_CFLAGS="${CGO_CFLAGS:-} -mmacosx-version-min=12.0"
     export CGO_LDFLAGS="${CGO_LDFLAGS:-} -mmacosx-version-min=12.0"
   fi
-  go build -tags production -trimpath -buildvcs=false -ldflags "$ldflags" -o "$stage/$binary_name" ./cmd/homestack-desktop
+  if [[ -n "${desktop_overlay:-}" ]]; then
+    go build -overlay "$desktop_overlay" -tags production -trimpath -buildvcs=false -ldflags "$ldflags" -o "$stage/$binary_name" "$package_path"
+  else
+    go build -tags production -trimpath -buildvcs=false -ldflags "$ldflags" -o "$stage/$binary_name" "$package_path"
+  fi
   verify_version "$stage/$binary_name" homestack-desktop
 }
 
@@ -114,6 +132,7 @@ package_darwin() {
   local app="$stage/HomeStack.app" contents="$stage/HomeStack.app/Contents"
   mkdir -p "$contents/MacOS" "$contents/Resources"
   mv "$stage/HomeStack" "$contents/MacOS/HomeStack"
+  cp "$brand_dir/homestack.icns" "$contents/Resources/HomeStack.icns"
   cp build/darwin/Info.plist "$contents/Info.plist"
   plutil -replace CFBundleExecutable -string HomeStack "$contents/Info.plist"
   plutil -replace CFBundleShortVersionString -string "$package_version" "$contents/Info.plist"
@@ -129,12 +148,26 @@ package_darwin() {
 }
 
 package_windows() {
-  build_desktop
   command -v makensis >/dev/null 2>&1 || { echo "Windows NSIS 打包缺少 makensis" >&2; exit 1; }
   command -v powershell.exe >/dev/null 2>&1 || { echo "Windows 打包缺少 powershell.exe" >&2; exit 1; }
   command -v cygpath >/dev/null 2>&1 || { echo "Windows Git Bash 缺少 cygpath" >&2; exit 1; }
   local portable="$stage/portable" update="$stage/update" assets="$stage/assets"
   mkdir -p "$portable" "$update" "$assets" "$stage/bin"
+  go tool wails3 generate build-assets -silent -dir "$assets" -name HomeStack -binaryname HomeStack \
+    -productname HomeStack -productcompany HomeStack -productidentifier dev.homestack.desktop \
+    -productdescription "HomeStack device connector" -productversion "$package_version" -productcopyright "Copyright 2026 HomeStack"
+  cp "$brand_dir/homestack.ico" "$assets/windows/icon.ico"
+  # Go 链接器不会从 overlay 读取虚拟 .syso，因此让真实 .syso 只存在于短期包目录。
+  repo_temp=$(mktemp -d "$repo_root/build/homestack-windows-package.XXXXXX")
+  touch "$repo_temp/main.go"
+  local syso="$repo_temp/wails_windows_${target_arch}.syso"
+  go tool wails3 generate syso -arch "$target_arch" -icon "$brand_dir/homestack.ico" \
+    -manifest "$assets/windows/wails.exe.manifest" -info "$assets/windows/info.json" -out "$syso"
+  desktop_overlay="$stage/windows-overlay.json"
+  node -e 'const fs=require("node:fs"); fs.writeFileSync(process.argv[1], JSON.stringify({Replace:{[process.argv[2]]:process.argv[3]}}));' \
+    "$desktop_overlay" "$repo_temp/main.go" "$repo_root/cmd/homestack-desktop/main.go"
+  desktop_package="./${repo_temp#"$repo_root/"}"
+  build_desktop
   cp "$stage/HomeStack.exe" "$portable/HomeStack.exe"
   cp README.md "$portable/README.md"
   cp "$stage/HomeStack.exe" "$update/HomeStack.exe"
@@ -145,9 +178,6 @@ package_windows() {
   binary_win=$(cygpath -w "$stage/HomeStack.exe")
   powershell.exe -NoProfile -Command "Compress-Archive -LiteralPath '$portable_win\\HomeStack.exe','$portable_win\\README.md' -DestinationPath '$output_win\\HomeStack_${version}_windows_${target_arch}_portable.zip' -CompressionLevel Optimal"
   powershell.exe -NoProfile -Command "Compress-Archive -LiteralPath '$update_win\\HomeStack.exe' -DestinationPath '$output_win\\HomeStack_${version}_windows_${target_arch}_update.zip' -CompressionLevel Optimal"
-  go tool wails3 generate build-assets -silent -dir "$assets" -name HomeStack -binaryname HomeStack \
-    -productname HomeStack -productcompany HomeStack -productidentifier dev.homestack.desktop \
-    -productdescription "HomeStack device connector" -productversion "$package_version" -productcopyright "Copyright 2026 HomeStack"
   local nsis_dir="$assets/windows/nsis" arch_flag=AMD64
   [[ "$target_arch" == "arm64" ]] && arch_flag=ARM64
   go tool wails3 generate webview2bootstrapper -dir "$nsis_dir"
@@ -163,13 +193,11 @@ package_windows() {
 
 package_linux_desktop() {
   build_desktop
-  local assets="$stage/assets" appimage_build="$stage/appimage" debroot="$stage/deb"
-  mkdir -p "$assets" "$appimage_build" "$debroot/DEBIAN" "$debroot/usr/bin" "$debroot/usr/share/applications"
-  go tool wails3 generate build-assets -silent -dir "$assets" -name HomeStack -binaryname HomeStack \
-    -productname HomeStack -productcompany HomeStack -productidentifier dev.homestack.desktop \
-    -productdescription "HomeStack device connector" -productversion "$package_version" -productcopyright "Copyright 2026 HomeStack"
-  go tool wails3 generate .desktop -name HomeStack -exec HomeStack -icon appicon -outputfile "$appimage_build/HomeStack.desktop" -categories "Utility;Network;"
-  go tool wails3 generate appimage -binary "$stage/HomeStack" -icon "$assets/appicon.png" \
+  local appimage_build="$stage/appimage" debroot="$stage/deb"
+  mkdir -p "$appimage_build" "$debroot/DEBIAN" "$debroot/usr/bin" "$debroot/usr/share/applications" \
+    "$debroot/usr/share/icons/hicolor/512x512/apps"
+  go tool wails3 generate .desktop -name HomeStack -exec HomeStack -icon homestack -outputfile "$appimage_build/HomeStack.desktop" -categories "Utility;Network;"
+  go tool wails3 generate appimage -binary "$stage/HomeStack" -icon "$brand_dir/homestack.png" \
     -desktopfile "$appimage_build/HomeStack.desktop" -outputdir "$output_dir" -builddir "$appimage_build/build"
   local generated_appimage
   generated_appimage=$(find "$output_dir" -maxdepth 1 -type f -iname '*.AppImage' -print -quit)
@@ -177,6 +205,7 @@ package_linux_desktop() {
   mv "$generated_appimage" "$output_dir/HomeStack_${version}_linux_${target_arch}.AppImage"
   install -m 0755 "$stage/HomeStack" "$debroot/usr/bin/HomeStack"
   install -m 0644 "$appimage_build/HomeStack.desktop" "$debroot/usr/share/applications/dev.homestack.desktop.desktop"
+  install -m 0644 "$brand_dir/homestack.png" "$debroot/usr/share/icons/hicolor/512x512/apps/homestack.png"
   cat > "$debroot/DEBIAN/control" <<EOF
 Package: homestack
 Version: $version
@@ -193,6 +222,7 @@ EOF
 case "$component" in
   control|agent) package_cli ;;
   desktop)
+    require_brand_assets
     case "$target_os" in
       darwin) package_darwin ;;
       windows) package_windows ;;

@@ -1,7 +1,8 @@
-import { ExternalLink, HardDrive, KeyRound, LogIn, LogOut, Plus, RefreshCw, ShieldCheck, Unplug } from "lucide-react";
+import { ExternalLink, HardDrive, KeyRound, LogIn, LogOut, Plus, RefreshCw, Unplug } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { NavLink, Route, Routes } from "react-router-dom";
 import { api } from "./api";
+import { BrandMark } from "./BrandMark";
 import { EnrollmentForm, type EnrollmentPolicy } from "./EnrollmentForm";
 import type { DeviceView } from "./types";
 import { CenteredLoader, EmptyState, Feedback, StatusPill, connectionTone, errorMessage } from "./ui";
@@ -17,9 +18,9 @@ export function ControlApp() {
       .then(([meta, identity]) => { setProviders(meta.providers); setMe(identity); }).catch((reason) => setError(errorMessage(reason))).finally(() => setChecked(true));
   }, []);
   if (!checked) return <CenteredLoader label="验证身份" />;
-  if (!me) return <main className="control-login"><div className="login-mark"><ShieldCheck size={27} /></div><h1>HomeStack Control</h1><div className="provider-list">{providers.map((provider) => <a key={provider.id} href={`/auth/login/${encodeURIComponent(provider.id)}?return=/`}><LogIn size={16} />{provider.label}</a>)}</div><Feedback error={error} /></main>;
+  if (!me) return <main className="control-login"><BrandMark className="login-mark" /><h1>HomeStack Control</h1><div className="provider-list">{providers.map((provider) => <a key={provider.id} href={`/auth/login/${encodeURIComponent(provider.id)}?return=/`}><LogIn size={16} />{provider.label}</a>)}</div><Feedback error={error} /></main>;
   async function logout() { try { await api<void>("/auth/logout", { method: "POST" }); location.assign("/"); } catch (reason) { setError(errorMessage(reason)); } }
-  return <div className="control-shell"><header><div className="chrome-brand"><span className="brand-mark">H</span><strong>HomeStack</strong><small>Control</small></div><nav><NavLink to="/"><HardDrive size={16} />设备</NavLink><NavLink to="/enroll"><Plus size={16} />配对</NavLink><NavLink to="/identities"><KeyRound size={16} />身份</NavLink><button onClick={() => void logout()}><LogOut size={16} />退出</button></nav></header><main><Routes><Route path="/" element={<ControlDevices me={me} />} /><Route path="/enroll" element={<ControlEnrollment />} /><Route path="/identities" element={<IdentitySettings me={me} providers={providers} />} /><Route path="*" element={<ControlDevices me={me} />} /></Routes><Feedback error={error} /></main></div>;
+  return <div className="control-shell"><header><div className="chrome-brand"><BrandMark className="brand-mark" /><strong>HomeStack</strong><small>Control</small></div><nav><NavLink to="/"><HardDrive size={16} />设备</NavLink><NavLink to="/enroll"><Plus size={16} />配对</NavLink><NavLink to="/identities"><KeyRound size={16} />身份</NavLink><button onClick={() => void logout()}><LogOut size={16} />退出</button></nav></header><main><Routes><Route path="/" element={<ControlDevices me={me} />} /><Route path="/enroll" element={<ControlEnrollment />} /><Route path="/identities" element={<IdentitySettings me={me} providers={providers} />} /><Route path="*" element={<ControlDevices me={me} />} /></Routes><Feedback error={error} /></main></div>;
 }
 
 function ControlDevices({ me }: { me: Me }) {
