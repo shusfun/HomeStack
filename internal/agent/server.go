@@ -281,7 +281,7 @@ func (s *Server) redeemTicket(writer http.ResponseWriter, request *http.Request)
 	}
 	http.SetCookie(writer, &http.Cookie{
 		Name: "homestack_session", Value: session, Path: "/", MaxAge: int((8 * time.Hour).Seconds()),
-		Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode,
+		Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode,
 	})
 	http.Redirect(writer, request, "/", http.StatusSeeOther)
 }

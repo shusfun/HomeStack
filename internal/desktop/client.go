@@ -294,6 +294,13 @@ func (c *APIClient) requestJSON(ctx context.Context, method, endpoint, accessTok
 	if accessToken != "" {
 		request.Header.Set("Authorization", "Bearer "+accessToken)
 	}
+	if method != http.MethodGet && method != http.MethodHead && method != http.MethodOptions {
+		origin, err := url.Parse(endpoint)
+		if err != nil || origin.Scheme == "" || origin.Host == "" {
+			return errors.New("Control 请求地址无效")
+		}
+		request.Header.Set("Origin", origin.Scheme+"://"+origin.Host)
+	}
 	client := c.HTTPClient
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}

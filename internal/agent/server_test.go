@@ -2,6 +2,7 @@ package agent
 
 import (
 	"crypto/ed25519"
+	"crypto/rand"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/wangshangbin/homestack/internal/protocol"
+	"github.com/wangshangbin/homestack/internal/secure"
 )
 
 func TestExpiredConfigBlocksTicketRedemption(t *testing.T) {
@@ -20,6 +22,43 @@ func TestExpiredConfigBlocksTicketRedemption(t *testing.T) {
 	server.redeemTicket(response, request)
 	if response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("过期配置应返回 %d，实际为 %d", http.StatusServiceUnavailable, response.Code)
+	}
+}
+
+func TestTicketRedemptionUsesLaxSecureSessionCookie(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	config := protocol.SignedDeviceConfig{
+		DeviceID: "device-1", Revision: 1, ControlURL: "https://control.example.com",
+		AgentURL: "https://nas.tail-name.ts.net:19443", ExpiresAt: now.Add(time.Hour),
+	}
+	sessions, err := OpenSessionStore("", config.DeviceID, config.ControlURL, publicKey, "control-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims := protocol.AccessTicketClaims{
+		Issuer: config.ControlURL, Subject: "owner-1", DeviceID: config.DeviceID,
+		Nonce: "nonce-1", IssuedAt: now, ExpiresAt: now.Add(30 * time.Second),
+	}
+	ticket, err := secure.SignJWS(privateKey, "control-test", claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{configStore: &ConfigStore{current: config}, sessions: sessions}
+	response := httptest.NewRecorder()
+	server.redeemTicket(response, httptest.NewRequest(http.MethodGet, "/access?ticket="+ticket, nil))
+	if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/" {
+		t.Fatalf("票据兑换应跳转到 Node 首页: %d %s", response.Code, response.Header().Get("Location"))
+	}
+	cookies := response.Result().Cookies()
+	if len(cookies) != 1 || cookies[0].Name != "homestack_session" {
+		t.Fatalf("票据兑换未写入 Node 会话 Cookie: %#v", cookies)
+	}
+	if !cookies[0].Secure || !cookies[0].HttpOnly || cookies[0].SameSite != http.SameSiteLaxMode {
+		t.Fatalf("Node 会话 Cookie 属性不安全或阻止跨站顶层跳转: %#v", cookies[0])
 	}
 }
 
