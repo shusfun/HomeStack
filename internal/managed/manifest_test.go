@@ -4,8 +4,6 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"encoding/base64"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -16,12 +14,15 @@ func TestFetchManifestVerifiesSignature(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload, _ := json.Marshal(Manifest{SchemaVersion: ManifestSchema, Artifacts: []Artifact{{
+	manifest := Manifest{SchemaVersion: ManifestSchema, Artifacts: []Artifact{{
 		Component: "filebrowser", Version: "0.3.5", Platform: "darwin", Arch: "arm64",
 		URL: "https://github.com/example/filebrowser", Filename: "filebrowser", Format: "binary", Size: 10,
 		SHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-	}}})
-	envelope, _ := json.Marshal(signedManifest{Payload: payload, Signature: base64.RawURLEncoding.EncodeToString(ed25519.Sign(privateKey, payload))})
+	}}}
+	envelope, err := SignManifest(manifest, privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
 	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) { _, _ = writer.Write(envelope) }))
 	defer server.Close()
 	if _, err := FetchManifest(context.Background(), server.Client(), server.URL, publicKey); err != nil {

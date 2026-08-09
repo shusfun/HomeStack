@@ -61,7 +61,7 @@ func SignManifest(manifest Manifest, privateKey ed25519.PrivateKey) ([]byte, err
 		return nil, err
 	}
 	envelope := signedManifest{Payload: payload, Signature: base64.RawURLEncoding.EncodeToString(ed25519.Sign(privateKey, payload))}
-	data, err := json.MarshalIndent(envelope, "", "  ")
+	data, err := json.Marshal(envelope)
 	if err != nil {
 		return nil, err
 	}
