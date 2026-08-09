@@ -13,8 +13,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -23,11 +25,20 @@ import (
 
 func main() {
 	output := flag.String("output", "dist/components.json", "组件清单输出路径")
+	dist := flag.String("dist", "dist", "组件镜像资产输出目录")
+	repository := flag.String("repository", "", "GitHub 仓库，例如 owner/repo")
+	tag := flag.String("tag", "", "GitHub Release 标签")
 	privateEncoded := flag.String("private-key", "", "base64 Ed25519 私钥")
 	flag.Parse()
 	privateKey := decodeKey(*privateEncoded)
 	if len(privateKey) != ed25519.PrivateKeySize {
 		fatal(errors.New("组件清单需要有效的 base64 Ed25519 私钥"))
+	}
+	if !validRepository.MatchString(*repository) || !validTag.MatchString(*tag) {
+		fatal(errors.New("组件镜像需要有效的 GitHub 仓库和 Release 标签"))
+	}
+	if err := os.MkdirAll(*dist, 0o755); err != nil {
+		fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
@@ -36,19 +47,23 @@ func main() {
 	cache := make(map[string]struct {
 		size   int64
 		digest string
+		url    string
 	})
 	for index := range artifacts {
 		current, ok := cache[artifacts[index].URL]
 		if !ok {
+			filename := mirrorFilename(artifacts[index])
 			var err error
-			current.size, current.digest, err = inspectRemote(ctx, client, artifacts[index])
+			current.size, current.digest, err = downloadRemote(ctx, client, artifacts[index], filepath.Join(*dist, filename))
 			if err != nil {
 				fatal(err)
 			}
+			current.url = releaseAssetURL(*repository, *tag, filename)
 			cache[artifacts[index].URL] = current
 		}
 		artifacts[index].Size = current.size
 		artifacts[index].SHA256 = current.digest
+		artifacts[index].URL = current.url
 	}
 	data, err := managed.SignManifest(managed.Manifest{SchemaVersion: managed.ManifestSchema, Artifacts: artifacts}, ed25519.PrivateKey(privateKey))
 	if err != nil {
@@ -72,7 +87,12 @@ func decodeKey(raw string) []byte {
 	return nil
 }
 
-func inspectRemote(ctx context.Context, client *http.Client, artifact managed.Artifact) (int64, string, error) {
+var (
+	validRepository = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
+	validTag        = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+(?:[.-][A-Za-z0-9.-]+)?$`)
+)
+
+func downloadRemote(ctx context.Context, client *http.Client, artifact managed.Artifact, target string) (int64, string, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, artifact.URL, nil)
 	if err != nil {
 		return 0, "", err
@@ -85,15 +105,43 @@ func inspectRemote(ctx context.Context, client *http.Client, artifact managed.Ar
 	if response.StatusCode != http.StatusOK {
 		return 0, "", fmt.Errorf("读取 %s 官方资产失败: HTTP %d", artifact.Component, response.StatusCode)
 	}
-	hash := sha256.New()
-	size, err := io.Copy(hash, io.LimitReader(response.Body, 512<<20+1))
+	file, err := os.CreateTemp(filepath.Dir(target), ".homestack-component-*")
 	if err != nil {
 		return 0, "", err
+	}
+	temporary := file.Name()
+	defer os.Remove(temporary)
+	hash := sha256.New()
+	size, copyErr := io.Copy(io.MultiWriter(file, hash), io.LimitReader(response.Body, 512<<20+1))
+	closeErr := file.Close()
+	if copyErr != nil {
+		return 0, "", copyErr
+	}
+	if closeErr != nil {
+		return 0, "", closeErr
 	}
 	if size < 1 || size > 512<<20 {
 		return 0, "", fmt.Errorf("%s 官方资产大小超出限制: %d", artifact.Component, size)
 	}
+	if err := os.Chmod(temporary, 0o644); err != nil {
+		return 0, "", err
+	}
+	if err := os.Rename(temporary, target); err != nil {
+		return 0, "", fmt.Errorf("保存 %s 镜像资产失败: %w", artifact.Component, err)
+	}
 	return size, hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func mirrorFilename(artifact managed.Artifact) string {
+	extension := map[string]string{"binary": "", "zip": ".zip", "tar.gz": ".tar.gz", "tar.xz": ".tar.xz"}[artifact.Format]
+	if artifact.Format == "binary" && artifact.Platform == "windows" {
+		extension = ".exe"
+	}
+	return fmt.Sprintf("%s_%s_%s_%s%s", artifact.Component, artifact.Version, artifact.Platform, artifact.Arch, extension)
+}
+
+func releaseAssetURL(repository, tag, filename string) string {
+	return "https://github.com/" + repository + "/releases/download/" + url.PathEscape(tag) + "/" + url.PathEscape(filename)
 }
 
 func componentSources() []managed.Artifact {
@@ -103,6 +151,7 @@ func componentSources() []managed.Artifact {
 		{Component: "filebrowser", Version: fileVersion, Platform: "darwin", Arch: "amd64", URL: "https://github.com/gtsteffaniak/filebrowser/releases/download/v0.3.5/darwin-amd64-filebrowser", Filename: "filebrowser", Format: "binary"},
 		{Component: "filebrowser", Version: fileVersion, Platform: "darwin", Arch: "arm64", URL: "https://github.com/gtsteffaniak/filebrowser/releases/download/v0.3.5/darwin-arm64-filebrowser", Filename: "filebrowser", Format: "binary"},
 		{Component: "filebrowser", Version: fileVersion, Platform: "windows", Arch: "amd64", URL: "https://github.com/gtsteffaniak/filebrowser/releases/download/v0.3.5/filebrowser.exe", Filename: "filebrowser.exe", Format: "binary"},
+		{Component: "filebrowser", Version: fileVersion, Platform: "windows", Arch: "arm64", URL: "https://github.com/gtsteffaniak/filebrowser/releases/download/v0.3.5/filebrowser.exe", Filename: "filebrowser.exe", Format: "binary"},
 		{Component: "filebrowser", Version: fileVersion, Platform: "linux", Arch: "amd64", URL: "https://github.com/gtsteffaniak/filebrowser/releases/download/v0.3.5/linux-amd64-filebrowser", Filename: "filebrowser", Format: "binary"},
 		{Component: "filebrowser", Version: fileVersion, Platform: "linux", Arch: "arm64", URL: "https://github.com/gtsteffaniak/filebrowser/releases/download/v0.3.5/linux-arm64-filebrowser", Filename: "filebrowser", Format: "binary"},
 		{Component: "jellyfin", Version: mediaVersion, Platform: "darwin", Arch: "amd64", URL: "https://repo.jellyfin.org/files/server/macos/stable/v10.11.11/amd64/jellyfin_10.11.11-amd64.tar.xz", Filename: "jellyfin.tar.xz", Format: "tar.xz"},
