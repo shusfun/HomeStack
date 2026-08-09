@@ -2,7 +2,7 @@
 
 | 组件 | 固定版本 | 用途 |
 | --- | --- | --- |
-| HomeStack | `0.2.5` | Control、App 与 Node |
+| HomeStack | `0.2.6` | Control、App 与 Node |
 | Tailscale | `1.102.2` | 官方 Tailnet 与 Serve |
 | Wails | `3.0.0-beta.4` | 桌面应用 |
 | FileBrowser Quantum | `0.3.5` | HomeStack 托管只读文件服务 |

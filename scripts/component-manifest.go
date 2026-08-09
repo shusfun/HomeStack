@@ -40,6 +40,7 @@ func main() {
 	for index := range artifacts {
 		current, ok := cache[artifacts[index].URL]
 		if !ok {
+			var err error
 			current.size, current.digest, err = inspectRemote(ctx, client, artifacts[index])
 			if err != nil {
 				fatal(err)

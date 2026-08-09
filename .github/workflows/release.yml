@@ -113,6 +113,9 @@ jobs:
       - name: 发布清单集成测试
         run: go test -p=2 -parallel=2 scripts/release-manifest.go scripts/release-manifest_test.go
 
+      - name: 托管组件清单编译检查
+        run: go run scripts/component-manifest.go --help
+
       - name: 上传共享前端
         uses: actions/upload-artifact@v7
         with:
