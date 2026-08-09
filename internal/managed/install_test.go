@@ -11,7 +11,10 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestInstallerRejectsDigestAndArchiveTraversal(t *testing.T) {
@@ -49,6 +52,63 @@ func TestInstallerIsIdempotentForBinary(t *testing.T) {
 	}
 	if info, err := os.Stat(first.Executable); err != nil || info.Mode().Perm() != 0o700 {
 		t.Fatalf("组件可执行权限错误: %v %v", info, err)
+	}
+}
+
+func TestInstallerSerializesConcurrentInstall(t *testing.T) {
+	data := []byte("filebrowser")
+	var requests atomic.Int32
+	firstRequest := make(chan struct{})
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		if requests.Add(1) == 1 {
+			close(firstRequest)
+			<-release
+		}
+		_, _ = writer.Write(data)
+	}))
+	defer server.Close()
+
+	artifact := Artifact{Component: "filebrowser", Version: "0.3.5", Platform: runtime.GOOS, Arch: runtime.GOARCH, URL: server.URL, Filename: "filebrowser", Format: "binary", Size: int64(len(data)), SHA256: fmt.Sprintf("%x", sha256.Sum256(data))}
+	installer := Installer{Client: server.Client(), Root: t.TempDir()}
+	results := make(chan Installation, 2)
+	errors := make(chan error, 2)
+	var workers sync.WaitGroup
+	workers.Add(2)
+	go func() {
+		defer workers.Done()
+		installed, err := installer.Ensure(context.Background(), artifact)
+		results <- installed
+		errors <- err
+	}()
+	<-firstRequest
+	go func() {
+		defer workers.Done()
+		installed, err := installer.Ensure(context.Background(), artifact)
+		results <- installed
+		errors <- err
+	}()
+	time.Sleep(20 * time.Millisecond)
+	close(release)
+	workers.Wait()
+	close(results)
+	close(errors)
+
+	for err := range errors {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	var executable string
+	for installed := range results {
+		if executable == "" {
+			executable = installed.Executable
+		} else if installed.Executable != executable {
+			t.Fatalf("并发安装未复用同一组件: first=%s second=%s", executable, installed.Executable)
+		}
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("并发安装重复下载组件: requests=%d", requests.Load())
 	}
 }
 

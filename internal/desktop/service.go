@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
@@ -21,8 +22,9 @@ import (
 )
 
 type Service struct {
-	client  *APIClient
-	updates *UpdateService
+	client             *APIClient
+	updates            *UpdateService
+	managedContentLock sync.Mutex
 }
 
 type SessionStatus struct {
@@ -77,6 +79,9 @@ func (s *Service) Providers(controlURL string) ([]Provider, error) {
 }
 
 func (s *Service) Login(controlURL, provider string) (SessionStatus, error) {
+	s.managedContentLock.Lock()
+	defer s.managedContentLock.Unlock()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 	session, err := s.client.Login(ctx, controlURL, provider)
@@ -114,6 +119,9 @@ func (s *Service) Login(controlURL, provider string) (SessionStatus, error) {
 }
 
 func (s *Service) Activate(controlURL, code string) (SessionStatus, error) {
+	s.managedContentLock.Lock()
+	defer s.managedContentLock.Unlock()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 	tailnet, err := tailscale.New()
@@ -147,6 +155,9 @@ func (s *Service) Activate(controlURL, code string) (SessionStatus, error) {
 }
 
 func (s *Service) Session() (SessionStatus, error) {
+	s.managedContentLock.Lock()
+	defer s.managedContentLock.Unlock()
+
 	hasSession, err := securestore.HasAppSession()
 	if err != nil {
 		return SessionStatus{}, err

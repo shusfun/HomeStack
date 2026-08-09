@@ -16,11 +16,14 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 
 	"github.com/ulikunitz/xz"
 )
 
 const maxExtractedSize int64 = 2 << 30
+
+var installLock sync.Mutex
 
 type Installation struct {
 	Component      string `json:"component"`
@@ -38,6 +41,9 @@ type Installer struct {
 }
 
 func (i Installer) Ensure(ctx context.Context, artifact Artifact) (Installation, error) {
+	installLock.Lock()
+	defer installLock.Unlock()
+
 	if i.Client == nil || !filepath.IsAbs(i.Root) {
 		return Installation{}, errors.New("托管组件安装器配置无效")
 	}
