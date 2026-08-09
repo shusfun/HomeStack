@@ -70,6 +70,25 @@ func RepairNodeAutostart() error {
 	return ConfigureNodeAutostart()
 }
 
+func RestartNode() error {
+	nodeAutostartMu.Lock()
+	defer nodeAutostartMu.Unlock()
+	switch runtime.GOOS {
+	case "darwin":
+		target := "gui/" + strconv.Itoa(os.Getuid()) + "/" + nodeLabel
+		return runStartupCommand("launchctl", "kickstart", "-k", target)
+	case "linux":
+		return runStartupCommand("systemctl", "--user", "restart", "homestack-node.service")
+	case "windows":
+		if err := runStartupCommand("schtasks", "/End", "/TN", "HomeStackNode"); err != nil {
+			return err
+		}
+		return runStartupCommand("schtasks", "/Run", "/TN", "HomeStackNode")
+	default:
+		return fmt.Errorf("不支持的 Node 重启平台: %s", runtime.GOOS)
+	}
+}
+
 func configureLaunchAgent(executable, tailscaleBinary string) error {
 	home, err := os.UserHomeDir()
 	if err != nil {

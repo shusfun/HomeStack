@@ -2,12 +2,20 @@ package desktop
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"time"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
+	"github.com/wangshangbin/homestack/internal/buildinfo"
+	"github.com/wangshangbin/homestack/internal/managed"
+	"github.com/wangshangbin/homestack/internal/protocol"
+	"github.com/wangshangbin/homestack/internal/secure"
 	"github.com/wangshangbin/homestack/internal/securestore"
 	"github.com/wangshangbin/homestack/internal/tailscale"
 )
@@ -69,7 +77,7 @@ func (s *Service) Providers(controlURL string) ([]Provider, error) {
 }
 
 func (s *Service) Login(controlURL, provider string) (SessionStatus, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 	session, err := s.client.Login(ctx, controlURL, provider)
 	if err != nil {
@@ -85,18 +93,28 @@ func (s *Service) Login(controlURL, provider string) (SessionStatus, error) {
 		_ = securestore.DeleteAppSession()
 		return SessionStatus{}, err
 	}
-	if _, err := s.client.RegisterCurrentNode(ctx, status); err != nil {
+	content, err := prepareManagedContent(ctx, nil)
+	if err != nil {
+		_ = securestore.DeleteAppSession()
+		return SessionStatus{}, err
+	}
+	if _, err := s.client.RegisterCurrentNode(ctx, status, &content); err != nil {
 		_ = securestore.DeleteAppSession()
 		return SessionStatus{}, err
 	}
 	if err := ConfigureNodeAutostart(); err != nil {
+		_ = securestore.DeleteAppSession()
+		return SessionStatus{}, err
+	}
+	if err := RestartNode(); err != nil {
+		_ = securestore.DeleteAppSession()
 		return SessionStatus{}, err
 	}
 	return SessionStatus{LoggedIn: true, ControlURL: session.ControlURL, ExpiresAt: session.AccessExpiresAt}, nil
 }
 
 func (s *Service) Activate(controlURL, code string) (SessionStatus, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 	tailnet, err := tailscale.New()
 	if err != nil {
@@ -106,10 +124,19 @@ func (s *Service) Activate(controlURL, code string) (SessionStatus, error) {
 	if err != nil {
 		return SessionStatus{}, err
 	}
-	if _, err := s.client.ActivateCurrentNode(ctx, controlURL, code, status); err != nil {
+	content, err := prepareManagedContent(ctx, nil)
+	if err != nil {
+		return SessionStatus{}, err
+	}
+	if _, err := s.client.ActivateCurrentNode(ctx, controlURL, code, status, &content); err != nil {
 		return SessionStatus{}, err
 	}
 	if err := ConfigureNodeAutostart(); err != nil {
+		_ = securestore.DeleteAppSession()
+		return SessionStatus{}, err
+	}
+	if err := RestartNode(); err != nil {
+		_ = securestore.DeleteAppSession()
 		return SessionStatus{}, err
 	}
 	session, err := securestore.LoadAppSession()
@@ -131,13 +158,78 @@ func (s *Service) Session() (SessionStatus, error) {
 	if err != nil {
 		return SessionStatus{}, err
 	}
-	if _, err := securestore.LoadDeviceProfile(); err != nil {
+	profile, err := securestore.LoadDeviceProfile()
+	if err != nil {
 		return SessionStatus{}, err
+	}
+	needsRegistration, err := contentRegistrationRequired(profile)
+	if err != nil {
+		return SessionStatus{}, err
+	}
+	if needsRegistration {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		tailnet, err := tailscale.New()
+		if err != nil {
+			return SessionStatus{}, err
+		}
+		status, err := tailnet.Status(ctx)
+		if err != nil {
+			return SessionStatus{}, err
+		}
+		var existing *managed.Profile
+		if profile.ManagedContent != nil && managed.ValidateProfile(*profile.ManagedContent) == nil {
+			existing = profile.ManagedContent
+		}
+		content, err := prepareManagedContent(ctx, existing)
+		if err != nil {
+			return SessionStatus{}, err
+		}
+		if _, err := s.client.RegisterCurrentNode(ctx, status, &content); err != nil {
+			return SessionStatus{}, err
+		}
+		if err := ConfigureNodeAutostart(); err != nil {
+			return SessionStatus{}, err
+		}
+		if err := RestartNode(); err != nil {
+			return SessionStatus{}, err
+		}
 	}
 	if err := RepairNodeAutostart(); err != nil {
 		return SessionStatus{}, err
 	}
 	return SessionStatus{LoggedIn: true, ControlURL: session.ControlURL, ExpiresAt: session.AccessExpiresAt}, nil
+}
+
+func contentRegistrationRequired(profile securestore.DeviceProfile) (bool, error) {
+	if profile.ManagedContent == nil || managed.ValidateProfile(*profile.ManagedContent) != nil {
+		return true, nil
+	}
+	publicKey, err := base64.RawURLEncoding.DecodeString(profile.ControlPublicKey)
+	if err != nil || len(publicKey) != ed25519.PublicKeySize {
+		return false, errors.New("设备安全档案中的 Control 公钥无效")
+	}
+	var config protocol.SignedDeviceConfig
+	if err := secure.VerifyJWS(profile.SignedConfig, ed25519.PublicKey(publicKey), profile.ControlKeyID, &config); err != nil {
+		return false, fmt.Errorf("验证设备签名配置失败: %w", err)
+	}
+	directories, modules, err := DiscoverDefaultContent()
+	if err != nil {
+		return false, err
+	}
+	return !slices.Equal(config.SharedDirectories, directories) || !slices.Equal(config.Modules, modules), nil
+}
+
+func prepareManagedContent(ctx context.Context, existing *managed.Profile) (managed.Profile, error) {
+	publicKey, err := decodeUpdatePublicKey(buildinfo.UpdatePublicKey)
+	if err != nil || len(publicKey) != ed25519.PublicKeySize {
+		return managed.Profile{}, errors.New("应用未内置有效的组件清单签名公钥")
+	}
+	stateDir, err := nodeStateDirectory()
+	if err != nil {
+		return managed.Profile{}, err
+	}
+	return managed.Prepare(ctx, stateDir, buildinfo.ComponentManifestURL, ed25519.PublicKey(publicKey), existing)
 }
 
 func (s *Service) Logout() error {

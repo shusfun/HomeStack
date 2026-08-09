@@ -36,6 +36,7 @@ export function DesktopApp() {
     } catch (reason) { setError(errorMessage(reason)); }
   }, []);
   useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => { const timer = window.setInterval(() => void refresh(), 10_000); return () => window.clearInterval(timer); }, [refresh]);
   useEffect(() => {
     const timer = window.setTimeout(() => {
       void Call.ByName(`${service}.CheckForUpdates`).then((value) => {
@@ -53,7 +54,8 @@ export function DesktopApp() {
     await Call.ByName(`${service}.Logout`); setSession({ logged_in: false }); setDevices([]); navigate("/");
   }
 
-  if (session === null) return <CenteredLoader label="读取 App 状态" />;
+  if (session === null && error) return <section className="login-panel"><BrandMark className="login-mark" /><h1>文件与影视准备失败</h1><Feedback error={error} /><button className="primary-button" onClick={() => void refresh()}><RefreshCw size={16} />重试</button></section>;
+  if (session === null) return <CenteredLoader label="正在读取登录状态" />;
   return <div className="desktop-shell">
     <DesktopChrome onRefresh={refresh} loggedIn={session.logged_in} onLogout={logout} updateAvailable={updateAvailable} />
     <main className="desktop-content">
@@ -84,28 +86,30 @@ function DesktopChrome({ onRefresh, loggedIn, onLogout, updateAvailable }: { onR
 function LoginPanel({ onLogin }: { onLogin: () => Promise<void> }) {
   const [controlURL, setControlURL] = useState(""); const [providers, setProviders] = useState<Provider[]>([]);
   const [activationCode, setActivationCode] = useState("");
-  const [busy, setBusy] = useState(false); const [error, setError] = useState("");
+  const [operation, setOperation] = useState<"idle" | "discovering" | "preparing">("idle"); const [error, setError] = useState("");
   async function discover() {
-    setBusy(true); setError("");
+    setOperation("discovering"); setError("");
     try { setProviders(await Call.ByName(`${service}.Providers`, controlURL.trim()) as Provider[]); }
-    catch (reason) { setError(errorMessage(reason)); } finally { setBusy(false); }
+    catch (reason) { setError(errorMessage(reason)); } finally { setOperation("idle"); }
   }
   async function login(provider: string) {
-    setBusy(true); setError("");
+    setOperation("preparing"); setError("");
     try { await Call.ByName(`${service}.Login`, controlURL.trim(), provider); await onLogin(); }
-    catch (reason) { setError(errorMessage(reason)); } finally { setBusy(false); }
+    catch (reason) { setError(errorMessage(reason)); } finally { setOperation("idle"); }
   }
   async function activate() {
-    setBusy(true); setError("");
+    setOperation("preparing"); setError("");
     try { await Call.ByName(`${service}.Activate`, controlURL.trim(), activationCode.trim()); await onLogin(); }
-    catch (reason) { setError(errorMessage(reason)); } finally { setBusy(false); }
+    catch (reason) { setError(errorMessage(reason)); } finally { setOperation("idle"); }
   }
-  return <section className="login-panel"><BrandMark className="login-mark" /><h1>连接 HomeStack</h1><div className="login-controls"><input type="url" value={controlURL} onChange={(event) => setControlURL(event.target.value)} placeholder="https://home.example.com" /><button className="primary-button" disabled={busy || !controlURL} onClick={() => void discover()}>读取登录方式</button></div>{providers.length > 0 && <div className="provider-list">{providers.map((provider) => <button key={provider.id} disabled={busy} onClick={() => void login(provider.id)}>{provider.label}</button>)}</div>}<div className="login-controls"><input type="password" value={activationCode} onChange={(event) => setActivationCode(event.target.value)} placeholder="一次性激活码" /><button className="secondary-button" disabled={busy || !controlURL || !activationCode} onClick={() => void activate()}>使用激活码</button></div><Feedback error={error} /></section>;
+  const busy = operation !== "idle";
+  return <section className="login-panel"><BrandMark className="login-mark" /><h1>连接 HomeStack</h1><div className="login-controls"><input type="url" value={controlURL} onChange={(event) => setControlURL(event.target.value)} placeholder="https://home.example.com" /><button className="primary-button" disabled={busy || !controlURL} onClick={() => void discover()}>{operation === "discovering" ? "正在读取登录方式" : "读取登录方式"}</button></div>{providers.length > 0 && <div className="provider-list">{providers.map((provider) => <button key={provider.id} disabled={busy} onClick={() => void login(provider.id)}>{operation === "preparing" ? "正在准备文件与影视" : provider.label}</button>)}</div>}<div className="login-controls"><input type="password" value={activationCode} onChange={(event) => setActivationCode(event.target.value)} placeholder="一次性激活码" /><button className="secondary-button" disabled={busy || !controlURL || !activationCode} onClick={() => void activate()}>{operation === "preparing" ? "正在准备文件与影视" : "使用激活码"}</button></div><Feedback error={error} /></section>;
 }
 
 function DeviceList({ devices, tailnet, setError }: { devices: DeviceView[]; tailnet: TailnetStatus | null; setError: (value: string) => void }) {
   async function open(id: string) { setError(""); try { await Call.ByName(`${service}.OpenDevice`, id); } catch (reason) { setError(errorMessage(reason)); } }
-  return <section className="device-page"><div className="summary-line"><div><h1>设备</h1><p>{tailnet?.online ? `${tailnet.connection} · ${tailnet.tailnet_ip || "Tailnet"}` : "请先登录 Tailscale"}</p></div></div>{devices.length === 0 ? <EmptyState icon={<Unplug size={24} />} label="尚未登记设备" /> : <div className="device-list">{devices.map((device) => <article className="device-row" key={device.id}><span className="device-icon"><HardDrive size={19} /></span><div className="device-copy"><strong>{device.name}</strong><small>{device.status?.tailscale_ip || device.magic_dns || device.agent_url}</small></div><StatusPill label={device.status?.online ? "在线" : "离线"} tone={device.status?.online ? "good" : "muted"} /><StatusPill label={device.status?.connection || "未连接"} tone={connectionTone(device.status?.connection)} /><button className="icon-button" onClick={() => void open(device.id)} title="用浏览器打开" aria-label={`打开 ${device.name}`}><ExternalLink size={17} /></button></article>)}</div>}</section>;
+  const contentState = (device: DeviceView) => { const content = (device.status?.capabilities || []).filter((item) => item.id === "files" || item.id === "media"); if (content.length < 2 || content.some((item) => item.state === "disabled")) return { label: "准备中", tone: "warn" as const, detail: "" }; if (content.every((item) => item.state === "ready")) return { label: "内容已就绪", tone: "good" as const, detail: "" }; return { label: "内容错误", tone: "warn" as const, detail: content.find((item) => item.state !== "ready")?.detail || "文件或影视服务未就绪" }; };
+  return <section className="device-page"><div className="summary-line"><div><h1>设备</h1><p>{tailnet?.online ? `${tailnet.connection} · ${tailnet.tailnet_ip || "Tailnet"}` : "请先登录 Tailscale"}</p></div></div>{devices.length === 0 ? <EmptyState icon={<Unplug size={24} />} label="尚未登记设备" /> : <div className="device-list">{devices.map((device) => { const content = contentState(device); return <article className="device-row" key={device.id}><span className="device-icon"><HardDrive size={19} /></span><div className="device-copy"><strong>{device.name}</strong><small>{content.detail || device.status?.tailscale_ip || device.magic_dns || device.agent_url}</small></div><StatusPill label={device.status?.online ? "在线" : "离线"} tone={device.status?.online ? "good" : "muted"} /><StatusPill label={content.label} tone={content.tone} /><button className="icon-button" onClick={() => void open(device.id)} title="用浏览器打开" aria-label={`打开 ${device.name}`}><ExternalLink size={17} /></button></article>; })}</div>}</section>;
 }
 
 function UpdatesPage({ onAvailabilityChange }: { onAvailabilityChange: (value: boolean) => void }) {

@@ -11,8 +11,9 @@ var (
 	Commit                 = "unknown"
 	Date                   = "unknown"
 	UpdateManifestURL      = "https://github.com/shusfun/HomeStack/releases/latest/download/latest.json"
-	UpdatePublicKey        = ""
+	UpdatePublicKey        = "U1XhiKGO95r4tRlXaW5YCBraZeiW2Lwu5oUX7u5sFFQ="
 	AgentUpdateManifestURL = "https://github.com/shusfun/HomeStack/releases/latest/download/latest.json"
+	ComponentManifestURL   = "https://github.com/shusfun/HomeStack/releases/latest/download/components.json"
 )
 
 func String(name string) string {

@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wangshangbin/homestack/internal/managed"
 	"github.com/wangshangbin/homestack/internal/protocol"
 	"github.com/wangshangbin/homestack/internal/publicurl"
 	"github.com/wangshangbin/homestack/internal/secure"
@@ -182,7 +183,7 @@ func (c *APIClient) refresh(ctx context.Context, session securestore.AppSession)
 	return updated, nil
 }
 
-func (c *APIClient) RegisterCurrentNode(ctx context.Context, status tailscale.Status) (securestore.DeviceProfile, error) {
+func (c *APIClient) RegisterCurrentNode(ctx context.Context, status tailscale.Status, content *managed.Profile) (securestore.DeviceProfile, error) {
 	session, err := securestore.LoadAppSession()
 	if err != nil {
 		return securestore.DeviceProfile{}, err
@@ -195,10 +196,10 @@ func (c *APIClient) RegisterCurrentNode(ctx context.Context, status tailscale.St
 	if err := c.AuthenticatedJSON(ctx, http.MethodPost, "/api/devices/register", request, &response, http.StatusCreated); err != nil {
 		return securestore.DeviceProfile{}, err
 	}
-	return saveRegistration(metadata, response, encryptionKey)
+	return saveRegistration(metadata, response, encryptionKey, content)
 }
 
-func (c *APIClient) ActivateCurrentNode(ctx context.Context, controlURL, code string, status tailscale.Status) (securestore.DeviceProfile, error) {
+func (c *APIClient) ActivateCurrentNode(ctx context.Context, controlURL, code string, status tailscale.Status, content *managed.Profile) (securestore.DeviceProfile, error) {
 	controlURL, err := validateControlURL(controlURL)
 	if err != nil {
 		return securestore.DeviceProfile{}, err
@@ -218,7 +219,7 @@ func (c *APIClient) ActivateCurrentNode(ctx context.Context, controlURL, code st
 	if err := securestore.SaveAppSession(session); err != nil {
 		return securestore.DeviceProfile{}, err
 	}
-	profile, err := saveRegistration(metadata, result.Registration, encryptionKey)
+	profile, err := saveRegistration(metadata, result.Registration, encryptionKey, content)
 	if err != nil {
 		_ = securestore.DeleteAppSession()
 		return securestore.DeviceProfile{}, err
@@ -248,11 +249,15 @@ func (c *APIClient) registrationRequest(ctx context.Context, controlURL string, 
 	if err != nil || strings.TrimSpace(name) == "" {
 		return metadata, protocol.NodeRegistration{}, nil, errors.New("读取设备名称失败")
 	}
-	request := protocol.NodeRegistration{Name: name, Platform: runtime.GOOS, Architecture: runtime.GOARCH, TailscaleIP: status.TailscaleIP, MagicDNS: status.MagicDNS, DevicePublicKey: base64.RawURLEncoding.EncodeToString(identityKey.Public().(ed25519.PublicKey)), EncryptionPublicKey: base64.RawURLEncoding.EncodeToString(encryptionKey.PublicKey().Bytes())}
+	directories, modules, err := DiscoverDefaultContent()
+	if err != nil {
+		return metadata, protocol.NodeRegistration{}, nil, err
+	}
+	request := protocol.NodeRegistration{Name: name, Platform: runtime.GOOS, Architecture: runtime.GOARCH, TailscaleIP: status.TailscaleIP, MagicDNS: status.MagicDNS, DevicePublicKey: base64.RawURLEncoding.EncodeToString(identityKey.Public().(ed25519.PublicKey)), EncryptionPublicKey: base64.RawURLEncoding.EncodeToString(encryptionKey.PublicKey().Bytes()), Modules: modules, SharedDirectories: directories}
 	return metadata, request, encryptionKey, nil
 }
 
-func saveRegistration(metadata registrationMetadata, response protocol.RegistrationResponse, encryptionKey *ecdh.PrivateKey) (securestore.DeviceProfile, error) {
+func saveRegistration(metadata registrationMetadata, response protocol.RegistrationResponse, encryptionKey *ecdh.PrivateKey, content *managed.Profile) (securestore.DeviceProfile, error) {
 	var credential protocol.DeviceCredential
 	if err := secure.OpenJSON(encryptionKey, response.SealedCredential, &credential); err != nil {
 		return securestore.DeviceProfile{}, fmt.Errorf("解密设备凭据失败: %w", err)
@@ -268,7 +273,7 @@ func saveRegistration(metadata registrationMetadata, response protocol.Registrat
 	if err := secure.VerifyJWS(response.SignedConfig, ed25519.PublicKey(publicKey), metadata.SigningKeyID, &config); err != nil {
 		return securestore.DeviceProfile{}, err
 	}
-	profile := securestore.DeviceProfile{DeviceID: response.DeviceID, DeviceName: response.DeviceName, ControlKeyID: metadata.SigningKeyID, ControlPublicKey: metadata.SigningPublicKey, SignedConfig: response.SignedConfig, Credential: credential}
+	profile := securestore.DeviceProfile{DeviceID: response.DeviceID, DeviceName: response.DeviceName, ControlKeyID: metadata.SigningKeyID, ControlPublicKey: metadata.SigningPublicKey, SignedConfig: response.SignedConfig, Credential: credential, ManagedContent: content}
 	if err := securestore.SaveDeviceProfile(profile); err != nil {
 		return securestore.DeviceProfile{}, err
 	}

@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -46,6 +47,56 @@ func TestRegistrationLocksTailnetAndRotatesDuplicateCredential(t *testing.T) {
 	}
 	if _, err := service.Register("owner", other); err != nil {
 		t.Fatalf("移除全部设备后仍不能更换 Tailnet: %v", err)
+	}
+}
+
+func TestRegistrationPreservesManagedContentConfiguration(t *testing.T) {
+	_, signingKey, _ := ed25519.GenerateKey(rand.Reader)
+	store := NewMemoryDeviceStore()
+	service, err := NewRegistrationService(store, signingKey, "control", "https://home.example.com", time.Now, rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := validNodeRegistration(t, "mac.tail-name.ts.net")
+	request.Platform = "darwin"
+	request.Modules = []protocol.ModuleConfig{
+		{ID: "filebrowser", Enabled: true, BaseURL: "http://127.0.0.1:19445", ReadOnly: true},
+		{ID: "jellyfin", Enabled: true, BaseURL: "http://127.0.0.1:19446", ReadOnly: true},
+	}
+	request.SharedDirectories = []protocol.SharedDirectory{{ID: "downloads", Name: "下载", Path: "/Users/test/Downloads"}}
+	response, err := service.Register("owner", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.Owned(response.DeviceID, "owner")
+	if err != nil {
+		t.Fatalf("读取登记后的设备失败: %v", err)
+	}
+	if !reflect.DeepEqual(record.Config.Modules, request.Modules) || !reflect.DeepEqual(record.Config.SharedDirectories, request.SharedDirectories) {
+		t.Fatalf("Control 未保留托管内容配置: %+v", record.Config)
+	}
+}
+
+func TestRegistrationRejectsUnsafeManagedContentConfiguration(t *testing.T) {
+	_, signingKey, _ := ed25519.GenerateKey(rand.Reader)
+	service, err := NewRegistrationService(NewMemoryDeviceStore(), signingKey, "control", "https://home.example.com", time.Now, rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, modules := range map[string][]protocol.ModuleConfig{
+		"非回环地址": {{ID: "jellyfin", Enabled: true, BaseURL: "http://192.0.2.1:19446", ReadOnly: true}},
+		"重复模块": {
+			{ID: "filebrowser", Enabled: true, BaseURL: "http://127.0.0.1:19445", ReadOnly: true},
+			{ID: "filebrowser", Enabled: true, BaseURL: "http://127.0.0.1:19445", ReadOnly: true},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			request := validNodeRegistration(t, "mac.tail-name.ts.net")
+			request.Modules = modules
+			if _, err := service.Register("owner", request); err == nil {
+				t.Fatal("不安全托管内容配置未被拒绝")
+			}
+		})
 	}
 }
 

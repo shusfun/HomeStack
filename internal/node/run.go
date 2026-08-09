@@ -19,6 +19,7 @@ import (
 	"github.com/wangshangbin/homestack/internal/agent"
 	"github.com/wangshangbin/homestack/internal/buildinfo"
 	"github.com/wangshangbin/homestack/internal/ccconnect"
+	"github.com/wangshangbin/homestack/internal/managed"
 	"github.com/wangshangbin/homestack/internal/protocol"
 	"github.com/wangshangbin/homestack/internal/securestore"
 	"github.com/wangshangbin/homestack/internal/tailscale"
@@ -90,7 +91,20 @@ func Run() error {
 			return err
 		}
 	}
-	server, err := agent.NewServer(agent.ServerOptions{DeviceID: profile.DeviceID, DeviceName: profile.DeviceName, ConfigStore: configStore, Sessions: sessions, Tailnet: tailnet, ModuleSecrets: profile.Credential.ModuleSecrets, Updater: updater})
+	moduleSecrets := profile.Credential.ModuleSecrets
+	if os.Getenv("HOMESTACK_NODE_PROFILE_SOURCE") == "keyring" && hasManagedContent(config) {
+		if profile.ManagedContent == nil {
+			return errors.New("设备配置启用了托管内容，但 Keyring 中缺少托管档案")
+		}
+		if _, err := managed.Start(ctx, profile.ManagedContent, config.SharedDirectories); err != nil {
+			return fmt.Errorf("启动托管文件与影视失败: %w", err)
+		}
+		moduleSecrets = profile.ManagedContent.ModuleSecrets
+		if err := securestore.SaveDeviceProfile(profile); err != nil {
+			return fmt.Errorf("保存托管内容凭据失败: %w", err)
+		}
+	}
+	server, err := agent.NewServer(agent.ServerOptions{DeviceID: profile.DeviceID, DeviceName: profile.DeviceName, ConfigStore: configStore, Sessions: sessions, Tailnet: tailnet, ModuleSecrets: moduleSecrets, Updater: updater})
 	if err != nil {
 		return err
 	}
@@ -110,6 +124,15 @@ func Run() error {
 	go heartbeatLoop(ctx, controlClient, configStore, server)
 	log.Printf("HomeStack Node 正在监听 %s", settings.address)
 	return agent.ServeHTTP(ctx, listener, server.Handler(web.Handler()))
+}
+
+func hasManagedContent(config protocol.SignedDeviceConfig) bool {
+	for _, module := range config.Modules {
+		if module.Enabled && (module.ID == "filebrowser" || module.ID == "jellyfin") {
+			return true
+		}
+	}
+	return false
 }
 
 func loadDeviceProfile() (securestore.DeviceProfile, error) {

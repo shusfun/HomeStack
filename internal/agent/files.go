@@ -2,6 +2,7 @@ package agent
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -27,6 +28,10 @@ type FileResource struct {
 	Files   []FileItem `json:"files"`
 	Folders []FileItem `json:"folders"`
 }
+type FileSearchResult struct {
+	FileItem
+	Path string `json:"path"`
+}
 
 func NewFileService(directories []protocol.SharedDirectory) *FileService {
 	roots := make(map[string]protocol.SharedDirectory, len(directories))
@@ -34,6 +39,29 @@ func NewFileService(directories []protocol.SharedDirectory) *FileService {
 		roots[directory.ID] = directory
 	}
 	return &FileService{roots: roots}
+}
+
+func (s *FileService) Health() error {
+	ids := make([]string, 0, len(s.roots))
+	for id := range s.roots {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		root := s.roots[id]
+		resolved, err := filepath.EvalSymlinks(root.Path)
+		if err != nil {
+			return fmt.Errorf("共享目录 %s 不可用: %w", root.Name, err)
+		}
+		info, err := os.Stat(resolved)
+		if err != nil {
+			return fmt.Errorf("共享目录 %s 不可用: %w", root.Name, err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("共享目录 %s 不再是目录", root.Name)
+		}
+	}
+	return nil
 }
 
 func (s *FileService) List(virtual string) (FileResource, error) {
@@ -59,6 +87,9 @@ func (s *FileService) List(virtual string) (FileResource, error) {
 	}
 	resource := FileResource{FileItem: fileItem(info), Path: virtual, Files: []FileItem{}, Folders: []FileItem{}}
 	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".") || entry.Type()&os.ModeSymlink != 0 {
+			continue
+		}
 		entryPath := filepath.Join(path, entry.Name())
 		target, err := filepath.EvalSymlinks(entryPath)
 		if err != nil {
@@ -81,6 +112,60 @@ func (s *FileService) List(virtual string) (FileResource, error) {
 	return resource, nil
 }
 
+func (s *FileService) Search(query string, limit int) ([]FileSearchResult, error) {
+	query = strings.ToLower(strings.TrimSpace(query))
+	if query == "" || len(query) > 200 || limit < 1 || limit > 200 {
+		return nil, errors.New("搜索关键词或结果数量无效")
+	}
+	results := make([]FileSearchResult, 0, limit)
+	visited := 0
+	for id, root := range s.roots {
+		rootPath, err := filepath.EvalSymlinks(root.Path)
+		if err != nil {
+			return nil, err
+		}
+		err = filepath.WalkDir(rootPath, func(path string, entry fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			visited++
+			if visited > 20_000 || len(results) >= limit {
+				return fs.SkipAll
+			}
+			if path == rootPath {
+				return nil
+			}
+			if strings.HasPrefix(entry.Name(), ".") {
+				if entry.IsDir() {
+					return fs.SkipDir
+				}
+				return nil
+			}
+			if entry.Type()&os.ModeSymlink != 0 || !strings.Contains(strings.ToLower(entry.Name()), query) {
+				return nil
+			}
+			info, err := entry.Info()
+			if err != nil {
+				return err
+			}
+			relative, err := filepath.Rel(rootPath, path)
+			if err != nil {
+				return err
+			}
+			results = append(results, FileSearchResult{FileItem: fileItem(info), Path: "/" + id + "/" + filepath.ToSlash(relative)})
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+		if len(results) >= limit || visited > 20_000 {
+			break
+		}
+	}
+	sort.SliceStable(results, func(i, j int) bool { return strings.ToLower(results[i].Path) < strings.ToLower(results[j].Path) })
+	return results, nil
+}
+
 func (s *FileService) ResolveFile(virtual string) (string, fs.FileInfo, error) {
 	path, info, err := s.resolve(cleanVirtual(virtual))
 	if err != nil {
@@ -96,6 +181,11 @@ func (s *FileService) resolve(virtual string) (string, fs.FileInfo, error) {
 	parts := strings.Split(strings.TrimPrefix(virtual, "/"), "/")
 	if len(parts) == 0 || parts[0] == "" {
 		return "", nil, errors.New("共享路径无效")
+	}
+	for _, part := range parts {
+		if strings.HasPrefix(part, ".") {
+			return "", nil, errors.New("拒绝访问隐藏路径")
+		}
 	}
 	root, ok := s.roots[parts[0]]
 	if !ok {

@@ -1,0 +1,349 @@
+package managed
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/wangshangbin/homestack/internal/protocol"
+)
+
+const (
+	FileBrowserURL = "http://127.0.0.1:19445"
+	JellyfinURL    = "http://127.0.0.1:19446"
+)
+
+type Runtime struct {
+	commands []*exec.Cmd
+}
+
+func Start(ctx context.Context, profile *Profile, directories []protocol.SharedDirectory) (*Runtime, error) {
+	if profile == nil {
+		return nil, errors.New("缺少托管内容档案")
+	}
+	if err := ValidateProfile(*profile); err != nil {
+		return nil, err
+	}
+	if len(directories) == 0 {
+		return nil, errors.New("托管内容没有共享目录")
+	}
+	for _, name := range []string{"filebrowser/root", "jellyfin/config", "jellyfin/data", "jellyfin/cache", "jellyfin/log"} {
+		if err := os.MkdirAll(filepath.Join(profile.StateDir, name), 0o700); err != nil {
+			return nil, err
+		}
+	}
+	fileConfig := filepath.Join(profile.StateDir, "filebrowser", "config.yaml")
+	if err := writeFileBrowserConfig(fileConfig, profile.FileRoot, profile); err != nil {
+		return nil, err
+	}
+	runtime := &Runtime{}
+	fileCommand, err := startProcess(ctx, profile.FileBrowser.Executable, []string{"-c", fileConfig}, nil, filepath.Join(profile.StateDir, "filebrowser", "filebrowser.log"))
+	if err != nil {
+		return nil, err
+	}
+	runtime.commands = append(runtime.commands, fileCommand)
+	mediaArgs := []string{
+		"--service", "--datadir", filepath.Join(profile.StateDir, "jellyfin/data"),
+		"--cachedir", filepath.Join(profile.StateDir, "jellyfin/cache"), "--configdir", filepath.Join(profile.StateDir, "jellyfin/config"),
+		"--logdir", filepath.Join(profile.StateDir, "jellyfin/log"), "--webdir", profile.Jellyfin.WebDir,
+		"--published-server-url", JellyfinURL, "--nonetchange",
+	}
+	if profile.Jellyfin.FFmpeg != "" {
+		mediaArgs = append(mediaArgs, "--ffmpeg", profile.Jellyfin.FFmpeg)
+	}
+	mediaEnv := []string{"ASPNETCORE_URLS=" + JellyfinURL, "DOTNET_CLI_TELEMETRY_OPTOUT=1"}
+	mediaCommand, err := startProcess(ctx, profile.Jellyfin.Executable, mediaArgs, mediaEnv, filepath.Join(profile.StateDir, "jellyfin", "jellyfin.log"))
+	if err != nil {
+		runtime.stop()
+		return nil, err
+	}
+	runtime.commands = append(runtime.commands, mediaCommand)
+	client := &http.Client{Timeout: 20 * time.Second}
+	if err := waitForHealth(ctx, client, FileBrowserURL+"/health", "FileBrowser"); err != nil {
+		runtime.stop()
+		return nil, err
+	}
+	if err := waitForHealth(ctx, client, JellyfinURL+"/System/Info/Public", "Jellyfin"); err != nil {
+		runtime.stop()
+		return nil, err
+	}
+	token, err := configureJellyfin(ctx, client, profile.JellyfinPassword, directories)
+	if err != nil {
+		runtime.stop()
+		return nil, err
+	}
+	if profile.ModuleSecrets == nil {
+		profile.ModuleSecrets = make(map[string]map[string]string)
+	}
+	profile.ModuleSecrets["jellyfin"] = map[string]string{"api_key": token}
+	pathEntries := []string{filepath.Dir(profile.FileBrowser.Executable), filepath.Dir(profile.Jellyfin.Executable)}
+	if current := os.Getenv("PATH"); current != "" {
+		pathEntries = append(pathEntries, current)
+	}
+	if err := os.Setenv("PATH", strings.Join(pathEntries, string(os.PathListSeparator))); err != nil {
+		runtime.stop()
+		return nil, err
+	}
+	return runtime, nil
+}
+
+func (r *Runtime) stop() {
+	for _, command := range r.commands {
+		if command.Process != nil {
+			_ = command.Process.Kill()
+		}
+	}
+}
+
+func writeFileBrowserConfig(path, root string, profile *Profile) error {
+	data := fmt.Sprintf("server:\n  address: 127.0.0.1\n  port: 19445\n  baseURL: /\n  root: %s\n  database: %s\n  log: %s\n  enableExec: false\n  enableThumbnails: true\nauth:\n  method: noauth\n  signup: false\nuserDefaults:\n  scope: .\n  hideDotfiles: true\n  disableSettings: true\n  permissions:\n    admin: false\n    create: false\n    rename: false\n    modify: false\n    delete: false\n    share: false\n    download: true\n    api: true\n", strconv.Quote(root), strconv.Quote(filepath.Join(profile.StateDir, "filebrowser", "database.db")), strconv.Quote(filepath.Join(profile.StateDir, "filebrowser", "filebrowser-internal.log")))
+	return atomicFile(path, []byte(data), 0o600)
+}
+
+func startProcess(ctx context.Context, executable string, args, extraEnv []string, logPath string) (*exec.Cmd, error) {
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	command := exec.CommandContext(ctx, executable, args...)
+	command.Env = append(os.Environ(), extraEnv...)
+	command.Stdout, command.Stderr = logFile, logFile
+	if err := command.Start(); err != nil {
+		_ = logFile.Close()
+		return nil, fmt.Errorf("启动 %s 失败: %w", filepath.Base(executable), err)
+	}
+	go func() {
+		_ = command.Wait()
+		_ = logFile.Close()
+	}()
+	return command, nil
+}
+
+func waitForHealth(ctx context.Context, client *http.Client, endpoint, name string) error {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	timeout := time.NewTimer(2 * time.Minute)
+	defer timeout.Stop()
+	for {
+		request, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		response, err := client.Do(request)
+		if err == nil {
+			_ = response.Body.Close()
+			if response.StatusCode >= 200 && response.StatusCode < 300 {
+				return nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timeout.C:
+			return fmt.Errorf("%s 启动后两分钟内未通过健康检查", name)
+		case <-ticker.C:
+		}
+	}
+}
+
+func configureJellyfin(ctx context.Context, client *http.Client, password string, directories []protocol.SharedDirectory) (string, error) {
+	var info struct {
+		StartupWizardCompleted bool `json:"StartupWizardCompleted"`
+	}
+	if err := jellyfinJSON(ctx, client, http.MethodGet, "/System/Info/Public", "", nil, &info, http.StatusOK); err != nil {
+		return "", err
+	}
+	if !info.StartupWizardCompleted {
+		steps := []struct {
+			path string
+			body any
+		}{
+			{"/Startup/Configuration", map[string]any{"ServerName": "HomeStack", "UICulture": "zh-CN", "MetadataCountryCode": "CN", "PreferredMetadataLanguage": "zh-CN"}},
+			{"/Startup/User", map[string]any{"Name": "homestack", "Password": password}},
+			{"/Startup/RemoteAccess", map[string]any{"EnableRemoteAccess": false, "EnableAutomaticPortMapping": false}},
+			{"/Startup/Complete", map[string]any{}},
+		}
+		for _, step := range steps {
+			if err := jellyfinJSON(ctx, client, http.MethodPost, step.path, "", step.body, nil, http.StatusNoContent); err != nil {
+				return "", err
+			}
+		}
+	}
+	var auth struct {
+		AccessToken string `json:"AccessToken"`
+	}
+	if err := jellyfinJSON(ctx, client, http.MethodPost, "/Users/AuthenticateByName", "", map[string]string{"Username": "homestack", "Pw": password}, &auth, http.StatusOK); err != nil {
+		return "", err
+	}
+	if auth.AccessToken == "" {
+		return "", errors.New("Jellyfin 登录响应缺少访问令牌")
+	}
+	apiKey, err := ensureJellyfinAPIKey(ctx, client, auth.AccessToken)
+	if err != nil {
+		return "", err
+	}
+	var folders []struct {
+		Name      string   `json:"Name"`
+		Locations []string `json:"Locations"`
+	}
+	if err := jellyfinJSON(ctx, client, http.MethodGet, "/Library/VirtualFolders", auth.AccessToken, nil, &folders, http.StatusOK); err != nil {
+		return "", err
+	}
+	found := false
+	currentPaths := []string{}
+	for _, folder := range folders {
+		if folder.Name == "HomeStack" {
+			found = true
+			currentPaths = folder.Locations
+		}
+	}
+	if !found {
+		pathInfos := make([]map[string]string, 0, len(directories))
+		for _, directory := range directories {
+			pathInfos = append(pathInfos, map[string]string{"Path": directory.Path})
+		}
+		query := url.Values{"name": {"HomeStack"}, "collectionType": {"mixed"}, "refreshLibrary": {"true"}}
+		body := map[string]any{"LibraryOptions": map[string]any{"PathInfos": pathInfos}}
+		if err := jellyfinJSON(ctx, client, http.MethodPost, "/Library/VirtualFolders?"+query.Encode(), auth.AccessToken, body, nil, http.StatusNoContent); err != nil {
+			return "", err
+		}
+	} else if err := reconcileJellyfinPaths(ctx, client, auth.AccessToken, currentPaths, directories); err != nil {
+		return "", err
+	}
+	return apiKey, nil
+}
+
+func reconcileJellyfinPaths(ctx context.Context, client *http.Client, accessToken string, current []string, directories []protocol.SharedDirectory) error {
+	existing := make(map[string]struct{}, len(current))
+	for _, path := range current {
+		existing[filepath.Clean(path)] = struct{}{}
+	}
+	desired := make(map[string]struct{}, len(directories))
+	for _, directory := range directories {
+		path := filepath.Clean(directory.Path)
+		desired[path] = struct{}{}
+		if _, ok := existing[path]; ok {
+			continue
+		}
+		query := url.Values{"refreshLibrary": {"true"}}
+		body := map[string]any{"Name": "HomeStack", "PathInfo": map[string]string{"Path": path}}
+		if err := jellyfinJSON(ctx, client, http.MethodPost, "/Library/VirtualFolders/Paths?"+query.Encode(), accessToken, body, nil, http.StatusNoContent); err != nil {
+			return err
+		}
+	}
+	for path := range existing {
+		if _, ok := desired[path]; ok {
+			continue
+		}
+		query := url.Values{"name": {"HomeStack"}, "path": {path}, "refreshLibrary": {"true"}}
+		if err := jellyfinJSON(ctx, client, http.MethodDelete, "/Library/VirtualFolders/Paths?"+query.Encode(), accessToken, nil, nil, http.StatusNoContent); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ensureJellyfinAPIKey(ctx context.Context, client *http.Client, accessToken string) (string, error) {
+	type keyInfo struct {
+		AppName     string `json:"AppName"`
+		AccessToken string `json:"AccessToken"`
+	}
+	load := func() ([]keyInfo, error) {
+		var result struct {
+			Items []keyInfo `json:"Items"`
+		}
+		if err := jellyfinJSON(ctx, client, http.MethodGet, "/Auth/Keys", accessToken, nil, &result, http.StatusOK); err != nil {
+			return nil, err
+		}
+		return result.Items, nil
+	}
+	keys, err := load()
+	if err != nil {
+		return "", err
+	}
+	for _, key := range keys {
+		if key.AppName == "HomeStack" && key.AccessToken != "" {
+			return key.AccessToken, nil
+		}
+	}
+	if err := jellyfinJSON(ctx, client, http.MethodPost, "/Auth/Keys?app=HomeStack", accessToken, nil, nil, http.StatusNoContent); err != nil {
+		return "", err
+	}
+	keys, err = load()
+	if err != nil {
+		return "", err
+	}
+	for _, key := range keys {
+		if key.AppName == "HomeStack" && key.AccessToken != "" {
+			return key.AccessToken, nil
+		}
+	}
+	return "", errors.New("Jellyfin 创建 API Key 后未返回 HomeStack 凭据")
+}
+
+func jellyfinJSON(ctx context.Context, client *http.Client, method, path, token string, body, target any, expected int) error {
+	var input io.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		input = bytes.NewReader(data)
+	}
+	request, err := http.NewRequestWithContext(ctx, method, JellyfinURL+path, input)
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Emby-Authorization", `MediaBrowser Client="HomeStack", Device="HomeStack Node", DeviceId="homestack-node", Version="1"`)
+	if token != "" {
+		request.Header.Set("X-Emby-Token", token)
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return fmt.Errorf("请求 Jellyfin %s 失败: %w", path, err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != expected {
+		detail, _ := io.ReadAll(io.LimitReader(response.Body, 32<<10))
+		return fmt.Errorf("Jellyfin %s 返回 HTTP %d: %s", path, response.StatusCode, strings.TrimSpace(string(detail)))
+	}
+	if target != nil {
+		if err := json.NewDecoder(io.LimitReader(response.Body, 4<<20)).Decode(target); err != nil {
+			return fmt.Errorf("解析 Jellyfin %s 响应失败: %w", path, err)
+		}
+	}
+	return nil
+}
+
+func atomicFile(path string, data []byte, mode os.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	file, err := os.CreateTemp(filepath.Dir(path), ".homestack-*")
+	if err != nil {
+		return err
+	}
+	temporary := file.Name()
+	defer os.Remove(temporary)
+	if err := file.Chmod(mode); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	return os.Rename(temporary, path)
+}

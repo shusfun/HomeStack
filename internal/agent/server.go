@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -62,7 +63,7 @@ func NewServer(options ServerOptions) (*Server, error) {
 		sessions: options.Sessions, tailnet: options.Tailnet, secrets: options.ModuleSecrets, system: options.System, updater: options.Updater,
 	}
 	if server.system == nil {
-		system, err := NewSystemClient(DefaultHelperSocket)
+		system, err := newDefaultSystemManager()
 		if err != nil {
 			return nil, err
 		}
@@ -97,8 +98,12 @@ func (s *Server) Reload() error {
 			mediaProxy = prefixProxy("/api/media", "", proxy)
 		}
 	}
+	var files *FileService
+	if len(config.SharedDirectories) > 0 {
+		files = NewFileService(config.SharedDirectories)
+	}
 	s.proxyMu.Lock()
-	s.files = NewFileService(config.SharedDirectories)
+	s.files = files
 	s.mediaProxy = mediaProxy
 	s.proxyMu.Unlock()
 	return nil
@@ -123,6 +128,7 @@ func (s *Server) Handler(static http.Handler) http.Handler {
 	mux.Handle("POST /api/updates/download", s.requireSession(s.requireActiveConfig(http.HandlerFunc(s.downloadUpdate))))
 	mux.Handle("POST /api/updates/install", s.requireSession(s.requireActiveConfig(http.HandlerFunc(s.installUpdate))))
 	mux.Handle("GET /api/files/resources", s.requireSession(s.requireActiveConfig(http.HandlerFunc(s.fileResources))))
+	mux.Handle("GET /api/files/search", s.requireSession(s.requireActiveConfig(http.HandlerFunc(s.fileSearch))))
 	mux.Handle("GET /api/files/raw", s.requireSession(s.requireActiveConfig(http.HandlerFunc(s.fileRaw))))
 	mux.Handle("/api/media/", s.requireSession(s.requireActiveConfig(s.dynamicProxy("jellyfin"))))
 	if static != nil {
@@ -334,10 +340,58 @@ func (s *Server) BuildStatus(ctx context.Context) (protocol.DeviceStatus, error)
 		statuses = append(statuses, components.Check(ctx, spec))
 		statuses[len(statuses)-1].ID = ModuleKey(module)
 	}
+	capabilities := []protocol.CapabilityStatus{{ID: "files", State: "disabled", Detail: "未配置共享目录"}, {ID: "media", State: "disabled", Detail: "Jellyfin 未启用"}, {ID: "system", State: "ready"}}
+	if len(config.SharedDirectories) > 0 {
+		s.proxyMu.RLock()
+		files := s.files
+		s.proxyMu.RUnlock()
+		if files == nil {
+			capabilities[0] = protocol.CapabilityStatus{ID: "files", State: "error", Detail: "文件服务未加载签名共享目录"}
+		} else if err := files.Health(); err != nil {
+			capabilities[0] = protocol.CapabilityStatus{ID: "files", State: "error", Detail: err.Error()}
+		} else {
+			capabilities[0] = protocol.CapabilityStatus{ID: "files", State: "ready"}
+		}
+	}
+	for _, status := range statuses {
+		if status.ID == "jellyfin" {
+			state := status.State
+			if state != "ready" {
+				state = "error"
+			}
+			capabilities[1] = protocol.CapabilityStatus{ID: "media", State: state, Detail: status.Detail}
+		}
+	}
+	if capabilities[1].State == "ready" {
+		servicesContext, servicesCancel := context.WithTimeout(ctx, 3*time.Second)
+		services, servicesErr := s.system.Services(servicesContext)
+		servicesCancel()
+		if servicesErr != nil {
+			capabilities[1] = protocol.CapabilityStatus{ID: "media", State: "error", Detail: servicesErr.Error()}
+		} else {
+			found := false
+			for _, service := range services {
+				if service.ID == "jellyfin" {
+					found = true
+					if service.State != "active" {
+						capabilities[1] = protocol.CapabilityStatus{ID: "media", State: "error", Detail: service.Detail}
+					}
+				}
+			}
+			if !found {
+				capabilities[1] = protocol.CapabilityStatus{ID: "media", State: "error", Detail: "Jellyfin 服务状态缺失"}
+			}
+		}
+	}
+	metricsContext, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if _, err := s.system.Metrics(metricsContext); err != nil {
+		capabilities[2] = protocol.CapabilityStatus{ID: "system", State: "error", Detail: err.Error()}
+	}
 	return protocol.DeviceStatus{
 		DeviceID: s.deviceID, Name: s.deviceName, Online: tailnet.Online,
 		TailscaleIP: tailnet.TailscaleIP, Connection: tailnet.Connection,
-		LastSeen: time.Now().UTC(), ConfigRevision: config.Revision, Modules: statuses,
+		LastSeen: time.Now().UTC(), ConfigRevision: config.Revision, Modules: statuses, Capabilities: capabilities,
 	}, nil
 }
 
@@ -371,6 +425,31 @@ func (s *Server) fileResources(writer http.ResponseWriter, request *http.Request
 	writeAgentJSON(writer, http.StatusOK, resource)
 }
 
+func (s *Server) fileSearch(writer http.ResponseWriter, request *http.Request) {
+	s.proxyMu.RLock()
+	files := s.files
+	s.proxyMu.RUnlock()
+	if files == nil {
+		writeAgentError(writer, http.StatusNotFound, "files_disabled", "未配置共享目录")
+		return
+	}
+	limit := 50
+	if raw := request.URL.Query().Get("limit"); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil {
+			writeAgentError(writer, http.StatusBadRequest, "invalid_limit", "搜索结果数量无效")
+			return
+		}
+		limit = value
+	}
+	results, err := files.Search(request.URL.Query().Get("q"), limit)
+	if err != nil {
+		writeAgentError(writer, http.StatusBadRequest, "search_rejected", err.Error())
+		return
+	}
+	writeAgentJSON(writer, http.StatusOK, map[string]any{"items": results})
+}
+
 func (s *Server) fileRaw(writer http.ResponseWriter, request *http.Request) {
 	s.proxyMu.RLock()
 	files := s.files
@@ -390,6 +469,11 @@ func (s *Server) fileRaw(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	defer file.Close()
+	disposition := "inline"
+	if request.URL.Query().Get("download") == "1" {
+		disposition = "attachment"
+	}
+	writer.Header().Set("Content-Disposition", mime.FormatMediaType(disposition, map[string]string{"filename": info.Name()}))
 	http.ServeContent(writer, request, info.Name(), info.ModTime(), file)
 }
 

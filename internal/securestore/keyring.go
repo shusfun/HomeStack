@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/wangshangbin/homestack/internal/managed"
 	"github.com/wangshangbin/homestack/internal/protocol"
 	"github.com/wangshangbin/homestack/internal/secure"
 	"github.com/zalando/go-keyring"
@@ -107,6 +108,7 @@ type DeviceProfile struct {
 	ControlPublicKey string                    `json:"control_public_key"`
 	SignedConfig     string                    `json:"signed_config"`
 	Credential       protocol.DeviceCredential `json:"credential"`
+	ManagedContent   *managed.Profile          `json:"managed_content,omitempty"`
 }
 
 func LoadOrCreateDeviceKey() (*ecdh.PrivateKey, error) {

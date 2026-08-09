@@ -136,7 +136,7 @@ func ValidateDeviceConfig(config protocol.SignedDeviceConfig) error {
 	}
 	seenModules := map[string]struct{}{}
 	for _, module := range config.Modules {
-		if !slices.Contains([]string{"jellyfin", "cc-connect"}, module.ID) {
+		if !slices.Contains([]string{"filebrowser", "jellyfin", "cc-connect"}, module.ID) {
 			return fmt.Errorf("未知模块 %q", module.ID)
 		}
 		moduleKey := ModuleKey(module)
@@ -148,15 +148,15 @@ func ValidateDeviceConfig(config protocol.SignedDeviceConfig) error {
 			continue
 		}
 		switch module.ID {
-		case "jellyfin":
+		case "filebrowser", "jellyfin":
 			if module.InstanceID != "" || module.WorkDir != "" {
-				return errors.New("Jellyfin 模块不允许设置 instance_id 或 work_dir")
+				return fmt.Errorf("%s 模块不允许设置 instance_id 或 work_dir", module.ID)
 			}
 			if !module.ReadOnly {
-				return errors.New("Jellyfin 模块必须为只读")
+				return fmt.Errorf("%s 模块必须为只读", module.ID)
 			}
 			if err := requireLoopbackURL(module.BaseURL); err != nil {
-				return fmt.Errorf("Jellyfin 地址无效: %w", err)
+				return fmt.Errorf("%s 地址无效: %w", module.ID, err)
 			}
 		case "cc-connect":
 			if !moduleInstancePattern.MatchString(module.InstanceID) {
@@ -170,10 +170,15 @@ func ValidateDeviceConfig(config protocol.SignedDeviceConfig) error {
 			}
 		}
 	}
+	seenDirectories := map[string]struct{}{}
 	for _, directory := range config.SharedDirectories {
 		if directory.ID == "" || directory.Name == "" || !filepath.IsAbs(directory.Path) || filepath.Clean(directory.Path) != directory.Path {
 			return errors.New("共享目录必须包含 ID、名称和规范化绝对路径")
 		}
+		if _, exists := seenDirectories[directory.ID]; exists {
+			return fmt.Errorf("共享目录 ID %q 重复", directory.ID)
+		}
+		seenDirectories[directory.ID] = struct{}{}
 	}
 	return nil
 }

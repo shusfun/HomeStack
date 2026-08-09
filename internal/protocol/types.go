@@ -10,6 +10,7 @@ type NodeRegistration struct {
 	MagicDNS            string            `json:"magic_dns"`
 	DevicePublicKey     string            `json:"device_public_key"`
 	EncryptionPublicKey string            `json:"encryption_public_key"`
+	Modules             []ModuleConfig    `json:"modules"`
 	SharedDirectories   []SharedDirectory `json:"shared_directories,omitempty"`
 }
 
@@ -69,15 +70,22 @@ type ModuleStatus struct {
 	CheckedAt       time.Time `json:"checked_at"`
 }
 
+type CapabilityStatus struct {
+	ID     string `json:"id"`
+	State  string `json:"state"`
+	Detail string `json:"detail,omitempty"`
+}
+
 type DeviceStatus struct {
-	DeviceID       string         `json:"device_id"`
-	Name           string         `json:"name"`
-	Online         bool           `json:"online"`
-	TailscaleIP    string         `json:"tailscale_ip,omitempty"`
-	Connection     string         `json:"connection"`
-	LastSeen       time.Time      `json:"last_seen"`
-	ConfigRevision uint64         `json:"config_revision"`
-	Modules        []ModuleStatus `json:"modules"`
+	DeviceID       string             `json:"device_id"`
+	Name           string             `json:"name"`
+	Online         bool               `json:"online"`
+	TailscaleIP    string             `json:"tailscale_ip,omitempty"`
+	Connection     string             `json:"connection"`
+	LastSeen       time.Time          `json:"last_seen"`
+	ConfigRevision uint64             `json:"config_revision"`
+	Modules        []ModuleStatus     `json:"modules"`
+	Capabilities   []CapabilityStatus `json:"capabilities"`
 }
 
 type AccessTicketClaims struct {

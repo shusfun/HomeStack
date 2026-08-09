@@ -24,9 +24,29 @@ func TestFileServiceRejectsTraversalSymlinkAndSpecialFiles(t *testing.T) {
 	if _, _, err := service.ResolveFile("/docs/allowed.txt"); err != nil {
 		t.Fatalf("普通文件被拒绝: %v", err)
 	}
-	for _, path := range []string{"/docs/../secret.txt", "/docs/escape"} {
+	if err := os.WriteFile(filepath.Join(root, ".hidden.txt"), []byte("hidden"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/docs/../secret.txt", "/docs/escape", "/docs/.hidden.txt"} {
 		if _, _, err := service.ResolveFile(path); err == nil {
 			t.Fatalf("越界路径 %q 未被拒绝", path)
 		}
+	}
+}
+
+func TestFileServiceSearchSkipsHiddenFiles(t *testing.T) {
+	root := t.TempDir()
+	for name, data := range map[string]string{"movie-one.mp4": "video", ".movie-secret.mp4": "secret", "note.txt": "text"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	service := NewFileService([]protocol.SharedDirectory{{ID: "videos", Name: "影视", Path: root}})
+	results, err := service.Search("movie", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Path != "/videos/movie-one.mp4" {
+		t.Fatalf("搜索结果包含隐藏文件或路径错误: %+v", results)
 	}
 }

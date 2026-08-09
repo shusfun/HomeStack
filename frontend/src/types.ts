@@ -34,6 +34,7 @@ export interface DeviceStatus {
   last_seen: string;
   config_revision: number;
   modules: ModuleStatus[];
+  capabilities: Array<{ id: string; state: string; detail?: string }>;
 }
 
 export interface DeviceView {
@@ -61,6 +62,7 @@ export interface FileItem {
   size: number;
   modified: string;
   type: string;
+	path?: string;
 }
 
 export interface FileResource extends FileItem {

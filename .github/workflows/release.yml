@@ -336,6 +336,16 @@ jobs:
           test ! -e dist/latest.json.sig
           test ! -e dist/checksums.txt
 
+      - name: 生成托管组件签名清单
+        shell: bash
+        env:
+          UPDATE_PRIVATE_KEY: ${{ secrets.HOMESTACK_UPDATE_PRIVATE_KEY }}
+        run: |
+          go run scripts/component-manifest.go \
+            --output dist/components.json \
+            --private-key "$UPDATE_PRIVATE_KEY"
+          test -s dist/components.json
+
       - name: 创建 GitHub Release
         shell: bash
         env:

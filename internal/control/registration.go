@@ -192,7 +192,7 @@ func (s *RegistrationService) Register(ownerID string, request protocol.NodeRegi
 	}
 	now := s.now().UTC()
 	agentURL := "https://" + request.MagicDNS + ":19443"
-	config := protocol.SignedDeviceConfig{DeviceID: deviceID, DeviceName: request.Name, Revision: revision, IssuedAt: now, ExpiresAt: now.Add(24 * time.Hour), ControlURL: s.publicURL, AgentURL: agentURL, Modules: []protocol.ModuleConfig{}, SharedDirectories: request.SharedDirectories}
+	config := protocol.SignedDeviceConfig{DeviceID: deviceID, DeviceName: request.Name, Revision: revision, IssuedAt: now, ExpiresAt: now.Add(24 * time.Hour), ControlURL: s.publicURL, AgentURL: agentURL, Modules: request.Modules, SharedDirectories: request.SharedDirectories}
 	if err := agent.ValidateDeviceConfig(config); err != nil {
 		return protocol.RegistrationResponse{}, err
 	}

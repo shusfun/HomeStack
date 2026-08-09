@@ -1,17 +1,37 @@
 package agent
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/wangshangbin/homestack/internal/protocol"
 	"github.com/wangshangbin/homestack/internal/secure"
+	"github.com/wangshangbin/homestack/internal/tailscale"
 )
+
+type failingMetricsSystem struct{}
+
+func (failingMetricsSystem) Metrics(context.Context) (SystemMetrics, error) {
+	return SystemMetrics{}, errors.New("指标采集失败")
+}
+func (failingMetricsSystem) Services(context.Context) ([]ServiceStatus, error) { return nil, nil }
+func (failingMetricsSystem) Action(context.Context, string, string) error      { return nil }
+func (failingMetricsSystem) Logs(context.Context, string, int, string) (LogPage, error) {
+	return LogPage{}, nil
+}
+
+type staticTailnet struct{ status tailscale.Status }
+
+func (s staticTailnet) Status(context.Context) (tailscale.Status, error) { return s.status, nil }
 
 func TestExpiredConfigBlocksTicketRedemption(t *testing.T) {
 	server := &Server{configStore: &ConfigStore{current: protocol.SignedDeviceConfig{
@@ -107,5 +127,51 @@ func TestAgentWriteOriginMustMatchConfiguredAgentURL(t *testing.T) {
 	request.Header.Set("Origin", "https://nas.tail-name.ts.net:19443")
 	if !server.validWriteOrigin(request) {
 		t.Fatal("Agent 自身 Origin 应通过写操作校验")
+	}
+}
+
+func TestBuildStatusKeepsContentCapabilitiesWhenMetricsFail(t *testing.T) {
+	root := t.TempDir()
+	server := &Server{
+		deviceID: "device-1", deviceName: "设备",
+		configStore: &ConfigStore{current: protocol.SignedDeviceConfig{
+			DeviceID: "device-1", Revision: 3, ExpiresAt: time.Now().UTC().Add(time.Hour),
+			SharedDirectories: []protocol.SharedDirectory{{ID: "docs", Name: "文档", Path: root}},
+		}},
+		tailnet: staticTailnet{status: tailscale.Status{Online: true, TailscaleIP: "100.64.0.8", Connection: "直连"}},
+		system:  failingMetricsSystem{},
+		files:   NewFileService([]protocol.SharedDirectory{{ID: "docs", Name: "文档", Path: root}}),
+	}
+	status, err := server.BuildStatus(context.Background())
+	if err != nil {
+		t.Fatalf("指标失败不应让设备状态整体失败: %v", err)
+	}
+	states := map[string]protocol.CapabilityStatus{}
+	for _, capability := range status.Capabilities {
+		states[capability.ID] = capability
+	}
+	if states["files"].State != "ready" || states["media"].State != "disabled" || states["system"].State != "error" || !strings.Contains(states["system"].Detail, "指标采集失败") {
+		t.Fatalf("能力状态未独立表达: %+v", status.Capabilities)
+	}
+}
+
+func TestFileRawSupportsInlineDownloadAndRange(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "movie.mp4")
+	if err := os.WriteFile(path, []byte("0123456789"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{files: NewFileService([]protocol.SharedDirectory{{ID: "videos", Name: "影视", Path: root}})}
+	rangeRequest := httptest.NewRequest(http.MethodGet, "/api/files/raw?files=/videos/movie.mp4", nil)
+	rangeRequest.Header.Set("Range", "bytes=2-5")
+	rangeResponse := httptest.NewRecorder()
+	server.fileRaw(rangeResponse, rangeRequest)
+	if rangeResponse.Code != http.StatusPartialContent || rangeResponse.Body.String() != "2345" || !strings.HasPrefix(rangeResponse.Header().Get("Content-Disposition"), "inline;") {
+		t.Fatalf("文件 Range 预览无效: %d %q %q", rangeResponse.Code, rangeResponse.Body.String(), rangeResponse.Header().Get("Content-Disposition"))
+	}
+	downloadResponse := httptest.NewRecorder()
+	server.fileRaw(downloadResponse, httptest.NewRequest(http.MethodGet, "/api/files/raw?files=/videos/movie.mp4&download=1", nil))
+	if downloadResponse.Code != http.StatusOK || !strings.HasPrefix(downloadResponse.Header().Get("Content-Disposition"), "attachment;") {
+		t.Fatalf("文件下载响应无效: %d %q", downloadResponse.Code, downloadResponse.Header().Get("Content-Disposition"))
 	}
 }
