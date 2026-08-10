@@ -80,7 +80,12 @@ func Start(ctx context.Context, profile *Profile, directories []protocol.SharedD
 		runtime.stop()
 		return nil, err
 	}
-	token, err := configureJellyfin(ctx, client, profile.JellyfinPassword, directories)
+	startupConfigurationReady, err := waitForJellyfinStartupConfiguration(ctx, client, JellyfinURL, 500*time.Millisecond, 2*time.Minute)
+	if err != nil {
+		runtime.stop()
+		return nil, err
+	}
+	token, err := configureJellyfin(ctx, client, profile.JellyfinPassword, directories, startupConfigurationReady)
 	if err != nil {
 		runtime.stop()
 		return nil, err
@@ -202,7 +207,59 @@ func waitForHealth(ctx context.Context, client *http.Client, endpoint, name stri
 	}
 }
 
-func configureJellyfin(ctx context.Context, client *http.Client, password string, directories []protocol.SharedDirectory) (string, error) {
+func waitForJellyfinStartupConfiguration(ctx context.Context, client *http.Client, baseURL string, retryInterval, startupTimeout time.Duration) (bool, error) {
+	ticker := time.NewTicker(retryInterval)
+	defer ticker.Stop()
+	timeout := time.NewTimer(startupTimeout)
+	defer timeout.Stop()
+	lastUnavailable := ""
+	for {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/Startup/Configuration", nil)
+		if err != nil {
+			return false, fmt.Errorf("创建 Jellyfin /Startup/Configuration 请求失败: %w", err)
+		}
+		response, err := client.Do(request)
+		if err != nil {
+			return false, fmt.Errorf("请求 Jellyfin /Startup/Configuration 失败: %w", err)
+		}
+		if response.StatusCode == http.StatusOK {
+			var configuration map[string]any
+			decodeErr := json.NewDecoder(io.LimitReader(response.Body, 4<<20)).Decode(&configuration)
+			_ = response.Body.Close()
+			if decodeErr != nil {
+				return false, fmt.Errorf("解析 Jellyfin /Startup/Configuration 响应失败: %w", decodeErr)
+			}
+			return true, nil
+		}
+		detail, _ := io.ReadAll(io.LimitReader(response.Body, 32<<10))
+		_ = response.Body.Close()
+		if response.StatusCode == http.StatusUnauthorized {
+			var info struct {
+				StartupWizardCompleted bool `json:"StartupWizardCompleted"`
+			}
+			if err := jellyfinJSONAt(ctx, client, baseURL, http.MethodGet, "/System/Info/Public", "", nil, &info, http.StatusOK); err != nil {
+				return false, err
+			}
+			if info.StartupWizardCompleted {
+				return false, nil
+			}
+			return false, fmt.Errorf("Jellyfin /Startup/Configuration 返回 HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(detail)))
+		}
+		if response.StatusCode != http.StatusServiceUnavailable {
+			return false, fmt.Errorf("Jellyfin /Startup/Configuration 返回 HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(detail)))
+		}
+		lastUnavailable = strings.TrimSpace(string(detail))
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-timeout.C:
+			return false, fmt.Errorf("Jellyfin 启动后两分钟内未准备好 /Startup/Configuration: %s", lastUnavailable)
+		case <-ticker.C:
+		}
+	}
+}
+
+func configureJellyfin(ctx context.Context, client *http.Client, password string, directories []protocol.SharedDirectory, startupConfigurationReady bool) (string, error) {
 	var info struct {
 		StartupWizardCompleted bool `json:"StartupWizardCompleted"`
 	}
@@ -210,6 +267,9 @@ func configureJellyfin(ctx context.Context, client *http.Client, password string
 		return "", err
 	}
 	if !info.StartupWizardCompleted {
+		if !startupConfigurationReady {
+			return "", errors.New("Jellyfin 首次启动配置尚未准备好，拒绝执行 Startup 写请求")
+		}
 		steps := []struct {
 			path string
 			body any
@@ -338,6 +398,10 @@ func ensureJellyfinAPIKey(ctx context.Context, client *http.Client, accessToken 
 }
 
 func jellyfinJSON(ctx context.Context, client *http.Client, method, path, token string, body, target any, expected int) error {
+	return jellyfinJSONAt(ctx, client, JellyfinURL, method, path, token, body, target, expected)
+}
+
+func jellyfinJSONAt(ctx context.Context, client *http.Client, baseURL, method, path, token string, body, target any, expected int) error {
 	var input io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -346,7 +410,7 @@ func jellyfinJSON(ctx context.Context, client *http.Client, method, path, token 
 		}
 		input = bytes.NewReader(data)
 	}
-	request, err := http.NewRequestWithContext(ctx, method, JellyfinURL+path, input)
+	request, err := http.NewRequestWithContext(ctx, method, baseURL+path, input)
 	if err != nil {
 		return err
 	}

@@ -13,8 +13,8 @@ Control 归档包含 Control、受限 Config Helper 和固定 systemd unit。桌
 发布标签：
 
 ```bash
-git tag v0.2.13
-git push origin main v0.2.13
+git tag v0.2.14
+git push origin main v0.2.14
 ```
 
 只有完整 GitHub Release 成功后，才允许在服务器使用带标签的官方安装器部署。
