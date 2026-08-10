@@ -21,6 +21,7 @@ const (
 	deviceKeyAccount      = "device-x25519"
 	deviceIdentityAccount = "device-ed25519"
 	deviceProfileName     = "device-profile"
+	managedContentAccount = "managed-content"
 	appSessionAccount     = "app-session"
 )
 
@@ -141,6 +142,16 @@ func SaveDeviceProfile(profile DeviceProfile) error {
 	if profile.DeviceID == "" || profile.ControlKeyID == "" || profile.ControlPublicKey == "" || profile.SignedConfig == "" || profile.Credential.DeviceToken == "" {
 		return errors.New("设备安全档案不完整")
 	}
+	if profile.ManagedContent != nil {
+		data, err := json.Marshal(profile.ManagedContent)
+		if err != nil {
+			return fmt.Errorf("编码托管内容档案失败: %w", err)
+		}
+		if err := keyring.Set(serviceName, managedContentAccount, string(data)); err != nil {
+			return fmt.Errorf("保存托管内容档案失败，不允许明文降级: %w", err)
+		}
+	}
+	profile.ManagedContent = nil
 	data, err := json.Marshal(profile)
 	if err != nil {
 		return fmt.Errorf("编码设备安全档案失败: %w", err)
@@ -159,6 +170,16 @@ func LoadDeviceProfile() (DeviceProfile, error) {
 	var profile DeviceProfile
 	if err := json.Unmarshal([]byte(data), &profile); err != nil {
 		return DeviceProfile{}, fmt.Errorf("解析设备安全档案失败: %w", err)
+	}
+	managedData, managedErr := keyring.Get(serviceName, managedContentAccount)
+	if managedErr == nil {
+		var content managed.Profile
+		if err := json.Unmarshal([]byte(managedData), &content); err != nil {
+			return DeviceProfile{}, fmt.Errorf("解析托管内容档案失败: %w", err)
+		}
+		profile.ManagedContent = &content
+	} else if !errors.Is(managedErr, keyring.ErrNotFound) {
+		return DeviceProfile{}, fmt.Errorf("读取托管内容档案失败: %w", managedErr)
 	}
 	if profile.DeviceID == "" || profile.ControlKeyID == "" || profile.ControlPublicKey == "" || profile.SignedConfig == "" || profile.Credential.DeviceToken == "" {
 		return DeviceProfile{}, errors.New("设备安全档案不完整")

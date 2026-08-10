@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/wangshangbin/homestack/internal/managed"
@@ -46,8 +47,8 @@ func TestDownloadRemoteWritesVerifiedMirror(t *testing.T) {
 	}))
 	defer server.Close()
 	target := filepath.Join(t.TempDir(), "component.bin")
-	artifact := managed.Artifact{Component: "filebrowser", Platform: "darwin", Arch: "amd64", URL: server.URL}
-	size, digest, err := downloadRemote(context.Background(), server.Client(), artifact, target)
+	artifact := managed.Artifact{Component: "filebrowser", Platform: "linux", Arch: "amd64", URL: server.URL}
+	size, digest, err := downloadRemote(context.Background(), server.Client(), artifact, target, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,6 +62,18 @@ func TestDownloadRemoteWritesVerifiedMirror(t *testing.T) {
 	}
 	if string(data) != string(payload) {
 		t.Fatalf("镜像资产内容错误: %q", data)
+	}
+}
+
+func TestDownloadRemoteRequiresUPXForDarwinFileBrowser(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = writer.Write([]byte("packed"))
+	}))
+	defer server.Close()
+	artifact := managed.Artifact{Component: "filebrowser", Platform: "darwin", Arch: "amd64", URL: server.URL}
+	_, _, err := downloadRemote(context.Background(), server.Client(), artifact, filepath.Join(t.TempDir(), "filebrowser"), "")
+	if err == nil || !strings.Contains(err.Error(), "固定 UPX") {
+		t.Fatalf("macOS FileBrowser 缺少 UPX 时未返回真实错误: %v", err)
 	}
 }
 

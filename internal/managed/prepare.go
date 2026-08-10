@@ -59,7 +59,7 @@ func Prepare(ctx context.Context, stateDir, manifestURL string, publicKey ed2551
 		return Profile{}, err
 	}
 	managedState := filepath.Join(stateDir, "managed")
-	profile := Profile{StateDir: managedState, FileRoot: filepath.Join(managedState, "filebrowser", "root"), FileBrowser: fileBrowser, Jellyfin: jellyfin, JellyfinPassword: mediaPassword, ModuleSecrets: map[string]map[string]string{}}
+	profile := Profile{SchemaVersion: ProfileSchema, StateDir: managedState, FileRoot: filepath.Join(managedState, "filebrowser", "root"), FileBrowser: fileBrowser, Jellyfin: jellyfin, JellyfinPassword: mediaPassword, ModuleSecrets: map[string]map[string]string{}}
 	if err := ValidateProfile(profile); err != nil {
 		return Profile{}, err
 	}
@@ -67,6 +67,9 @@ func Prepare(ctx context.Context, stateDir, manifestURL string, publicKey ed2551
 }
 
 func ValidateProfile(profile Profile) error {
+	if profile.SchemaVersion != ProfileSchema {
+		return fmt.Errorf("托管内容档案 schema 不受支持: %d", profile.SchemaVersion)
+	}
 	if !filepath.IsAbs(profile.StateDir) || !filepath.IsAbs(profile.FileRoot) || profile.FileBrowser.Component != "filebrowser" || profile.FileBrowser.Version != FileBrowserVersion || profile.Jellyfin.Component != "jellyfin" || profile.Jellyfin.Version != JellyfinVersion || profile.JellyfinPassword == "" {
 		return errors.New("托管内容档案不完整")
 	}

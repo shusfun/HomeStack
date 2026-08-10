@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -28,6 +29,7 @@ func main() {
 	dist := flag.String("dist", "dist", "组件镜像资产输出目录")
 	repository := flag.String("repository", "", "GitHub 仓库，例如 owner/repo")
 	tag := flag.String("tag", "", "GitHub Release 标签")
+	upx := flag.String("upx", "", "用于解压 macOS FileBrowser 的固定 UPX 绝对路径")
 	privateEncoded := flag.String("private-key", "", "base64 Ed25519 私钥")
 	flag.Parse()
 	privateKey := decodeKey(*privateEncoded)
@@ -54,7 +56,7 @@ func main() {
 		if !ok {
 			filename := mirrorFilename(artifacts[index])
 			var err error
-			current.size, current.digest, err = downloadRemote(ctx, client, artifacts[index], filepath.Join(*dist, filename))
+			current.size, current.digest, err = downloadRemote(ctx, client, artifacts[index], filepath.Join(*dist, filename), *upx)
 			if err != nil {
 				fatal(err)
 			}
@@ -92,7 +94,7 @@ var (
 	validTag        = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+(?:[.-][A-Za-z0-9.-]+)?$`)
 )
 
-func downloadRemote(ctx context.Context, client *http.Client, artifact managed.Artifact, target string) (int64, string, error) {
+func downloadRemote(ctx context.Context, client *http.Client, artifact managed.Artifact, target, upxBinary string) (int64, string, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, artifact.URL, nil)
 	if err != nil {
 		return 0, "", err
@@ -111,8 +113,7 @@ func downloadRemote(ctx context.Context, client *http.Client, artifact managed.A
 	}
 	temporary := file.Name()
 	defer os.Remove(temporary)
-	hash := sha256.New()
-	size, copyErr := io.Copy(io.MultiWriter(file, hash), io.LimitReader(response.Body, 512<<20+1))
+	size, copyErr := io.Copy(file, io.LimitReader(response.Body, 512<<20+1))
 	closeErr := file.Close()
 	if copyErr != nil {
 		return 0, "", copyErr
@@ -123,11 +124,56 @@ func downloadRemote(ctx context.Context, client *http.Client, artifact managed.A
 	if size < 1 || size > 512<<20 {
 		return 0, "", fmt.Errorf("%s 官方资产大小超出限制: %d", artifact.Component, size)
 	}
+	if requiresUPXUnpack(artifact) {
+		if err := unpackUPX(ctx, upxBinary, temporary); err != nil {
+			return 0, "", err
+		}
+	}
+	size, digest, err := inspectLocalAsset(temporary)
+	if err != nil {
+		return 0, "", err
+	}
 	if err := os.Chmod(temporary, 0o644); err != nil {
 		return 0, "", err
 	}
 	if err := os.Rename(temporary, target); err != nil {
 		return 0, "", fmt.Errorf("保存 %s 镜像资产失败: %w", artifact.Component, err)
+	}
+	return size, digest, nil
+}
+
+func requiresUPXUnpack(artifact managed.Artifact) bool {
+	return artifact.Component == "filebrowser" && artifact.Platform == "darwin"
+}
+
+func unpackUPX(ctx context.Context, binary, target string) error {
+	if !filepath.IsAbs(binary) {
+		return errors.New("解压 macOS FileBrowser 需要固定 UPX 绝对路径")
+	}
+	info, err := os.Stat(binary)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		return errors.New("固定 UPX 不存在或不可执行")
+	}
+	output, err := exec.CommandContext(ctx, binary, "-d", target).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("解压 macOS FileBrowser 失败: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func inspectLocalAsset(path string) (int64, string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return 0, "", err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	size, err := io.Copy(hash, io.LimitReader(file, 512<<20+1))
+	if err != nil {
+		return 0, "", err
+	}
+	if size < 1 || size > 512<<20 {
+		return 0, "", fmt.Errorf("镜像资产大小超出限制: %d", size)
 	}
 	return size, hex.EncodeToString(hash.Sum(nil)), nil
 }

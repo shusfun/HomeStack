@@ -16,7 +16,10 @@ import (
 	"strings"
 )
 
-const ManifestSchema = 1
+const (
+	ManifestSchema = 1
+	ProfileSchema  = 1
+)
 
 type Artifact struct {
 	Component string `json:"component"`
@@ -36,6 +39,7 @@ type Manifest struct {
 }
 
 type Profile struct {
+	SchemaVersion    int                          `json:"schema_version"`
 	StateDir         string                       `json:"state_dir"`
 	FileRoot         string                       `json:"file_root"`
 	FileBrowser      Installation                 `json:"filebrowser"`
