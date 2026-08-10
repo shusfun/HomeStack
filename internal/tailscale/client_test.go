@@ -53,9 +53,7 @@ func TestEnsureServePreservesConfigurationAndNeverRunsUp(t *testing.T) {
 		calls = append(calls, joined)
 		switch joined {
 		case "serve status --json":
-			return []byte(`{"Web":{"443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:3000"}}}}}`), nil
-		case "funnel status --json":
-			return []byte(`null`), nil
+			return []byte(`{"TCP":{"443":{"HTTPS":true}},"Web":{"host.tail-name.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:3000"}}}}}`), nil
 		case "serve --yes --bg --https=19443 http://127.0.0.1:19444":
 			return nil, nil
 		default:
@@ -72,16 +70,27 @@ func TestEnsureServePreservesConfigurationAndNeverRunsUp(t *testing.T) {
 	}
 }
 
+func TestEnsureServeReusesExistingTailnetOnlyProxy(t *testing.T) {
+	var calls []string
+	client := &Client{Binary: "tailscale", Run: func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		calls = append(calls, strings.Join(args, " "))
+		return []byte(`{"TCP":{"19443":{"HTTPS":true}},"Web":{"mac.tail-name.ts.net:19443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:19444"}}}}}`), nil
+	}}
+	if err := client.EnsureServe(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 1 || calls[0] != "serve status --json" {
+		t.Fatalf("复用现有 Serve 时执行了多余命令: %v", calls)
+	}
+}
+
 func TestEnsureServeRejectsPortAndFunnelConflict(t *testing.T) {
 	for _, funnel := range []bool{false, true} {
 		client := &Client{Binary: "tailscale", Run: func(_ context.Context, _ string, args ...string) ([]byte, error) {
-			if args[0] == "serve" {
-				if funnel {
-					return []byte(`null`), nil
-				}
-				return []byte(`{"19443":"http://127.0.0.1:9999"}`), nil
+			if funnel {
+				return []byte(`{"TCP":{"19443":{"HTTPS":true}},"Web":{"mac.tail-name.ts.net:19443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:19444"}}}},"AllowFunnel":{"mac.tail-name.ts.net:19443":true}}`), nil
 			}
-			return []byte(`{"19443":true}`), nil
+			return []byte(`{"TCP":{"19443":{"HTTPS":true}},"Web":{"mac.tail-name.ts.net:19443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:9999"}}}}}`), nil
 		}}
 		if err := client.EnsureServe(context.Background()); err == nil {
 			t.Fatal("冲突配置必须被拒绝")

@@ -6,7 +6,7 @@ info:
   productIdentifier: "dev.homestack.desktop"
   description: "多端 NAS 与远程开发整合器"
   copyright: "Copyright 2026 HomeStack"
-  version: "0.2.1"
+  version: "0.2.16"
 
 dev_mode:
   root_path: .
@@ -20,8 +20,9 @@ dev_mode:
       - internal/web/dist
     file:
       - .DS_Store
-  watched_extension:
-    - "*.go"
+    watched_extension:
+      # 不匹配任何仓库文件，Wails 仅在任务结束时显式重启。
+      - "__homestack_manual_restart_only__"
   git_ignore: true
   executes:
     - cmd: pnpm --dir frontend dev

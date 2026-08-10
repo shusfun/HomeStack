@@ -22,7 +22,7 @@ type Spec struct {
 
 var FixedSpecs = []Spec{
 	{ID: "tailscale", Binary: "tailscale", VersionArgs: []string{"version"}, ExpectedVersion: "1.102.2", VersionPattern: regexp.MustCompile(`\b1\.102\.2\b`)},
-	{ID: "filebrowser", Binary: "filebrowser", VersionArgs: []string{"version"}, ExpectedVersion: "0.3.5", VersionPattern: regexp.MustCompile(`\bv?0\.3\.5\b`)},
+	{ID: "filebrowser", Binary: "filebrowser", VersionArgs: []string{"version"}, ExpectedVersion: "1.5.1-stable", VersionPattern: regexp.MustCompile(`\bv?1\.5\.1(?:-stable)?\b`)},
 	{ID: "jellyfin", Binary: "jellyfin", VersionArgs: []string{"--version"}, ExpectedVersion: "10.11.11", VersionPattern: regexp.MustCompile(`\b10\.11\.11\b`)},
 	{ID: "cc-connect", Binary: "cc-connect", VersionArgs: []string{"--version"}, ExpectedVersion: "1.4.1", VersionPattern: regexp.MustCompile(`\bv?1\.4\.1\b`)},
 }

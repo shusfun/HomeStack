@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -29,7 +28,6 @@ func main() {
 	dist := flag.String("dist", "dist", "组件镜像资产输出目录")
 	repository := flag.String("repository", "", "GitHub 仓库，例如 owner/repo")
 	tag := flag.String("tag", "", "GitHub Release 标签")
-	upx := flag.String("upx", "", "用于解压 macOS FileBrowser 的固定 UPX 绝对路径")
 	privateEncoded := flag.String("private-key", "", "base64 Ed25519 私钥")
 	flag.Parse()
 	privateKey := decodeKey(*privateEncoded)
@@ -56,7 +54,7 @@ func main() {
 		if !ok {
 			filename := mirrorFilename(artifacts[index])
 			var err error
-			current.size, current.digest, err = downloadRemote(ctx, client, artifacts[index], filepath.Join(*dist, filename), *upx)
+			current.size, current.digest, err = downloadRemote(ctx, client, artifacts[index], filepath.Join(*dist, filename))
 			if err != nil {
 				fatal(err)
 			}
@@ -94,7 +92,7 @@ var (
 	validTag        = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+(?:[.-][A-Za-z0-9.-]+)?$`)
 )
 
-func downloadRemote(ctx context.Context, client *http.Client, artifact managed.Artifact, target, upxBinary string) (int64, string, error) {
+func downloadRemote(ctx context.Context, client *http.Client, artifact managed.Artifact, target string) (int64, string, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, artifact.URL, nil)
 	if err != nil {
 		return 0, "", err
@@ -124,11 +122,6 @@ func downloadRemote(ctx context.Context, client *http.Client, artifact managed.A
 	if size < 1 || size > 512<<20 {
 		return 0, "", fmt.Errorf("%s 官方资产大小超出限制: %d", artifact.Component, size)
 	}
-	if requiresUPXUnpack(artifact) {
-		if err := unpackUPX(ctx, upxBinary, temporary); err != nil {
-			return 0, "", err
-		}
-	}
 	size, digest, err := inspectLocalAsset(temporary)
 	if err != nil {
 		return 0, "", err
@@ -140,25 +133,6 @@ func downloadRemote(ctx context.Context, client *http.Client, artifact managed.A
 		return 0, "", fmt.Errorf("保存 %s 镜像资产失败: %w", artifact.Component, err)
 	}
 	return size, digest, nil
-}
-
-func requiresUPXUnpack(artifact managed.Artifact) bool {
-	return artifact.Component == "filebrowser" && artifact.Platform == "darwin"
-}
-
-func unpackUPX(ctx context.Context, binary, target string) error {
-	if !filepath.IsAbs(binary) {
-		return errors.New("解压 macOS FileBrowser 需要固定 UPX 绝对路径")
-	}
-	info, err := os.Stat(binary)
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
-		return errors.New("固定 UPX 不存在或不可执行")
-	}
-	output, err := exec.CommandContext(ctx, binary, "-d", target).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("解压 macOS FileBrowser 失败: %w: %s", err, strings.TrimSpace(string(output)))
-	}
-	return nil
 }
 
 func inspectLocalAsset(path string) (int64, string, error) {
@@ -191,16 +165,16 @@ func releaseAssetURL(repository, tag, filename string) string {
 }
 
 func componentSources() []managed.Artifact {
-	const fileVersion = "0.3.5"
+	const fileVersion = "1.5.1-stable"
 	const mediaVersion = "10.11.11"
 	const ffmpegVersion = "7.1.4-3"
 	return []managed.Artifact{
-		{Component: "filebrowser", Version: fileVersion, Platform: "darwin", Arch: "amd64", URL: "https://github.com/gtsteffaniak/filebrowser/releases/download/v0.3.5/darwin-amd64-filebrowser", Filename: "filebrowser", Format: "binary"},
-		{Component: "filebrowser", Version: fileVersion, Platform: "darwin", Arch: "arm64", URL: "https://github.com/gtsteffaniak/filebrowser/releases/download/v0.3.5/darwin-arm64-filebrowser", Filename: "filebrowser", Format: "binary"},
-		{Component: "filebrowser", Version: fileVersion, Platform: "windows", Arch: "amd64", URL: "https://github.com/gtsteffaniak/filebrowser/releases/download/v0.3.5/filebrowser.exe", Filename: "filebrowser.exe", Format: "binary"},
-		{Component: "filebrowser", Version: fileVersion, Platform: "windows", Arch: "arm64", URL: "https://github.com/gtsteffaniak/filebrowser/releases/download/v0.3.5/filebrowser.exe", Filename: "filebrowser.exe", Format: "binary"},
-		{Component: "filebrowser", Version: fileVersion, Platform: "linux", Arch: "amd64", URL: "https://github.com/gtsteffaniak/filebrowser/releases/download/v0.3.5/linux-amd64-filebrowser", Filename: "filebrowser", Format: "binary"},
-		{Component: "filebrowser", Version: fileVersion, Platform: "linux", Arch: "arm64", URL: "https://github.com/gtsteffaniak/filebrowser/releases/download/v0.3.5/linux-arm64-filebrowser", Filename: "filebrowser", Format: "binary"},
+		{Component: "filebrowser", Version: fileVersion, Platform: "darwin", Arch: "amd64", URL: "https://github.com/gtsteffaniak/filebrowser/releases/download/v1.5.1-stable/darwin-amd64-filebrowser", Filename: "filebrowser", Format: "binary"},
+		{Component: "filebrowser", Version: fileVersion, Platform: "darwin", Arch: "arm64", URL: "https://github.com/gtsteffaniak/filebrowser/releases/download/v1.5.1-stable/darwin-arm64-filebrowser", Filename: "filebrowser", Format: "binary"},
+		{Component: "filebrowser", Version: fileVersion, Platform: "windows", Arch: "amd64", URL: "https://github.com/gtsteffaniak/filebrowser/releases/download/v1.5.1-stable/filebrowser.exe", Filename: "filebrowser.exe", Format: "binary"},
+		{Component: "filebrowser", Version: fileVersion, Platform: "windows", Arch: "arm64", URL: "https://github.com/gtsteffaniak/filebrowser/releases/download/v1.5.1-stable/filebrowser.exe", Filename: "filebrowser.exe", Format: "binary"},
+		{Component: "filebrowser", Version: fileVersion, Platform: "linux", Arch: "amd64", URL: "https://github.com/gtsteffaniak/filebrowser/releases/download/v1.5.1-stable/linux-amd64-filebrowser", Filename: "filebrowser", Format: "binary"},
+		{Component: "filebrowser", Version: fileVersion, Platform: "linux", Arch: "arm64", URL: "https://github.com/gtsteffaniak/filebrowser/releases/download/v1.5.1-stable/linux-arm64-filebrowser", Filename: "filebrowser", Format: "binary"},
 		{Component: "jellyfin", Version: mediaVersion, Platform: "darwin", Arch: "amd64", URL: "https://repo.jellyfin.org/files/server/macos/stable/v10.11.11/amd64/jellyfin_10.11.11-amd64.tar.xz", Filename: "jellyfin.tar.xz", Format: "tar.xz"},
 		{Component: "jellyfin", Version: mediaVersion, Platform: "darwin", Arch: "arm64", URL: "https://repo.jellyfin.org/files/server/macos/stable/v10.11.11/arm64/jellyfin_10.11.11-arm64.tar.xz", Filename: "jellyfin.tar.xz", Format: "tar.xz"},
 		{Component: "jellyfin", Version: mediaVersion, Platform: "windows", Arch: "amd64", URL: "https://repo.jellyfin.org/files/server/windows/stable/v10.11.11/amd64/jellyfin_10.11.11-amd64.zip", Filename: "jellyfin.zip", Format: "zip"},

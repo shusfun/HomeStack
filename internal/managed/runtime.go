@@ -13,7 +13,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -23,6 +22,9 @@ import (
 const (
 	FileBrowserURL = "http://127.0.0.1:19445"
 	JellyfinURL    = "http://127.0.0.1:19446"
+
+	jellyfinRequestTimeout = 20 * time.Second
+	jellyfinLibraryTimeout = 2 * time.Minute
 )
 
 type Runtime struct {
@@ -48,7 +50,7 @@ func Start(ctx context.Context, profile *Profile, directories []protocol.SharedD
 		return nil, err
 	}
 	fileConfig := filepath.Join(profile.StateDir, "filebrowser", "config.yaml")
-	if err := writeFileBrowserConfig(fileConfig, profile.FileRoot, profile); err != nil {
+	if err := writeFileBrowserConfig(fileConfig, directories, profile); err != nil {
 		return nil, err
 	}
 	runtime := &Runtime{}
@@ -71,7 +73,7 @@ func Start(ctx context.Context, profile *Profile, directories []protocol.SharedD
 		return nil, err
 	}
 	runtime.commands = append(runtime.commands, mediaCommand)
-	client := &http.Client{Timeout: 20 * time.Second}
+	client := &http.Client{Timeout: jellyfinRequestTimeout}
 	if err := waitForHealth(ctx, client, FileBrowserURL+"/health", "FileBrowser"); err != nil {
 		runtime.stop()
 		return nil, err
@@ -159,9 +161,87 @@ func (r *Runtime) stop() {
 	}
 }
 
-func writeFileBrowserConfig(path, root string, profile *Profile) error {
-	data := fmt.Sprintf("server:\n  address: 127.0.0.1\n  port: 19445\n  baseURL: /\n  root: %s\n  database: %s\n  log: %s\n  enableExec: false\n  enableThumbnails: true\nauth:\n  method: noauth\n  signup: false\nuserDefaults:\n  scope: .\n  hideDotfiles: true\n  disableSettings: true\n  permissions:\n    admin: false\n    create: false\n    rename: false\n    modify: false\n    delete: false\n    share: false\n    download: true\n    api: true\n", strconv.Quote(root), strconv.Quote(filepath.Join(profile.StateDir, "filebrowser", "database.db")), strconv.Quote(filepath.Join(profile.StateDir, "filebrowser", "filebrowser-internal.log")))
-	return atomicFile(path, []byte(data), 0o600)
+func writeFileBrowserConfig(path string, directories []protocol.SharedDirectory, profile *Profile) error {
+	if profile == nil {
+		return errors.New("缺少 FileBrowser 托管档案")
+	}
+	sources := make([]map[string]any, 0, len(directories))
+	names := make(map[string]struct{}, len(directories))
+	paths := make(map[string]struct{}, len(directories))
+	for _, directory := range directories {
+		name := strings.TrimSpace(directory.Name)
+		cleanPath := filepath.Clean(directory.Path)
+		if name == "" || directory.ID == "" || !filepath.IsAbs(cleanPath) {
+			return fmt.Errorf("FileBrowser 共享目录无效: id=%q name=%q", directory.ID, directory.Name)
+		}
+		if _, exists := names[name]; exists {
+			return fmt.Errorf("FileBrowser 共享目录名称重复: %s", name)
+		}
+		if _, exists := paths[cleanPath]; exists {
+			return fmt.Errorf("FileBrowser 共享目录路径重复: %s", cleanPath)
+		}
+		names[name] = struct{}{}
+		paths[cleanPath] = struct{}{}
+		sources = append(sources, map[string]any{
+			"path": cleanPath,
+			"name": name,
+			"config": map[string]any{
+				"readOnly":       true,
+				"private":        true,
+				"defaultEnabled": true,
+				"rules": []map[string]any{{
+					"folderPath":     "/",
+					"ignoreHidden":   true,
+					"ignoreSymlinks": true,
+				}},
+			},
+		})
+	}
+	if len(sources) == 0 {
+		return errors.New("FileBrowser 没有可用的共享目录")
+	}
+	config := map[string]any{
+		"server": map[string]any{
+			"listen":             "127.0.0.1",
+			"port":               19445,
+			"baseURL":            "/",
+			"database":           filepath.Join(profile.StateDir, "filebrowser", "database-"+FileBrowserVersion+".db"),
+			"cacheDir":           filepath.Join(profile.StateDir, "filebrowser", "cache-"+FileBrowserVersion),
+			"disableUpdateCheck": true,
+			"disableWebDAV":      true,
+			"logging": []map[string]any{{
+				"levels":   "info|warning|error",
+				"output":   "stdout",
+				"noColors": true,
+			}},
+			"sources": sources,
+		},
+		"auth": map[string]any{
+			"methods": map[string]any{"noauth": true},
+		},
+		"frontend": map[string]any{
+			"name":                  "HomeStack",
+			"disableDefaultLinks":   true,
+			"disableUsedPercentage": true,
+		},
+		"userDefaults": map[string]any{
+			"listing": map[string]any{"showHidden": false},
+			"account": map[string]any{
+				"lockPassword":    true,
+				"disableSettings": true,
+				"permissions": map[string]any{
+					"api": false, "admin": false, "modify": false, "share": false,
+					"realtime": false, "delete": false, "create": false, "download": true,
+				},
+			},
+		},
+	}
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return fmt.Errorf("生成 FileBrowser 配置失败: %w", err)
+	}
+	data = append(data, '\n')
+	return atomicFile(path, data, 0o600)
 }
 
 func startProcess(ctx context.Context, executable string, args, extraEnv []string, logPath string) (*exec.Cmd, error) {
@@ -252,11 +332,41 @@ func waitForJellyfinStartupConfiguration(ctx context.Context, client *http.Clien
 		detail, _ := io.ReadAll(io.LimitReader(response.Body, 32<<10))
 		_ = response.Body.Close()
 		if response.StatusCode == http.StatusUnauthorized {
+			request, requestErr := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/System/Info/Public", nil)
+			if requestErr != nil {
+				return false, fmt.Errorf("创建 Jellyfin /System/Info/Public 请求失败: %w", requestErr)
+			}
+			infoResponse, requestErr := client.Do(request)
+			if requestErr != nil {
+				sawServiceUnavailable = true
+				lastUnavailable = requestErr.Error()
+				if err := waitForRetry(lastUnavailable); err != nil {
+					return false, err
+				}
+				continue
+			}
+			if infoResponse.StatusCode == http.StatusServiceUnavailable {
+				sawServiceUnavailable = true
+				detail, _ := io.ReadAll(io.LimitReader(infoResponse.Body, 32<<10))
+				_ = infoResponse.Body.Close()
+				lastUnavailable = strings.TrimSpace(string(detail))
+				if err := waitForRetry(lastUnavailable); err != nil {
+					return false, err
+				}
+				continue
+			}
+			if infoResponse.StatusCode != http.StatusOK {
+				detail, _ := io.ReadAll(io.LimitReader(infoResponse.Body, 32<<10))
+				_ = infoResponse.Body.Close()
+				return false, fmt.Errorf("Jellyfin /System/Info/Public 返回 HTTP %d: %s", infoResponse.StatusCode, strings.TrimSpace(string(detail)))
+			}
 			var info struct {
 				StartupWizardCompleted bool `json:"StartupWizardCompleted"`
 			}
-			if err := jellyfinJSONAt(ctx, client, baseURL, http.MethodGet, "/System/Info/Public", "", nil, &info, http.StatusOK); err != nil {
-				return false, err
+			decodeErr := json.NewDecoder(io.LimitReader(infoResponse.Body, 4<<20)).Decode(&info)
+			_ = infoResponse.Body.Close()
+			if decodeErr != nil {
+				return false, fmt.Errorf("解析 Jellyfin /System/Info/Public 响应失败: %w", decodeErr)
 			}
 			if info.StartupWizardCompleted {
 				return false, nil
@@ -275,29 +385,9 @@ func waitForJellyfinStartupConfiguration(ctx context.Context, client *http.Clien
 }
 
 func configureJellyfin(ctx context.Context, client *http.Client, password string, directories []protocol.SharedDirectory, startupConfigurationReady bool) (string, error) {
-	var info struct {
-		StartupWizardCompleted bool `json:"StartupWizardCompleted"`
-	}
-	if err := jellyfinJSON(ctx, client, http.MethodGet, "/System/Info/Public", "", nil, &info, http.StatusOK); err != nil {
-		return "", err
-	}
-	if !info.StartupWizardCompleted {
-		if !startupConfigurationReady {
-			return "", errors.New("Jellyfin 首次启动配置尚未准备好，拒绝执行 Startup 写请求")
-		}
-		steps := []struct {
-			path string
-			body any
-		}{
-			{"/Startup/Configuration", map[string]any{"ServerName": "HomeStack", "UICulture": "zh-CN", "MetadataCountryCode": "CN", "PreferredMetadataLanguage": "zh-CN"}},
-			{"/Startup/User", map[string]any{"Name": "homestack", "Password": password}},
-			{"/Startup/RemoteAccess", map[string]any{"EnableRemoteAccess": false, "EnableAutomaticPortMapping": false}},
-			{"/Startup/Complete", map[string]any{}},
-		}
-		for _, step := range steps {
-			if err := jellyfinJSON(ctx, client, http.MethodPost, step.path, "", step.body, nil, http.StatusNoContent); err != nil {
-				return "", err
-			}
+	if startupConfigurationReady {
+		if err := configureJellyfinStartup(ctx, client, JellyfinURL, password); err != nil {
+			return "", err
 		}
 	}
 	var auth struct {
@@ -320,6 +410,8 @@ func configureJellyfin(ctx context.Context, client *http.Client, password string
 	if err := jellyfinJSON(ctx, client, http.MethodGet, "/Library/VirtualFolders", auth.AccessToken, nil, &folders, http.StatusOK); err != nil {
 		return "", err
 	}
+	libraryClient := *client
+	libraryClient.Timeout = jellyfinLibraryTimeout
 	found := false
 	currentPaths := []string{}
 	for _, folder := range folders {
@@ -335,13 +427,37 @@ func configureJellyfin(ctx context.Context, client *http.Client, password string
 		}
 		query := url.Values{"name": {"HomeStack"}, "collectionType": {"mixed"}, "refreshLibrary": {"true"}}
 		body := map[string]any{"LibraryOptions": map[string]any{"PathInfos": pathInfos}}
-		if err := jellyfinJSON(ctx, client, http.MethodPost, "/Library/VirtualFolders?"+query.Encode(), auth.AccessToken, body, nil, http.StatusNoContent); err != nil {
+		if err := jellyfinJSON(ctx, &libraryClient, http.MethodPost, "/Library/VirtualFolders?"+query.Encode(), auth.AccessToken, body, nil, http.StatusNoContent); err != nil {
 			return "", err
 		}
-	} else if err := reconcileJellyfinPaths(ctx, client, auth.AccessToken, currentPaths, directories); err != nil {
+	} else if err := reconcileJellyfinPaths(ctx, &libraryClient, auth.AccessToken, currentPaths, directories); err != nil {
 		return "", err
 	}
 	return apiKey, nil
+}
+
+func configureJellyfinStartup(ctx context.Context, client *http.Client, baseURL, password string) error {
+	if err := jellyfinJSONAt(ctx, client, baseURL, http.MethodPost, "/Startup/Configuration", "", map[string]any{"ServerName": "HomeStack", "UICulture": "zh-CN", "MetadataCountryCode": "CN", "PreferredMetadataLanguage": "zh-CN"}, nil, http.StatusNoContent); err != nil {
+		return err
+	}
+	var firstUser map[string]any
+	if err := jellyfinJSONAt(ctx, client, baseURL, http.MethodGet, "/Startup/User", "", nil, &firstUser, http.StatusOK); err != nil {
+		return err
+	}
+	steps := []struct {
+		path string
+		body any
+	}{
+		{"/Startup/User", map[string]any{"Name": "homestack", "Password": password}},
+		{"/Startup/RemoteAccess", map[string]any{"EnableRemoteAccess": false, "EnableAutomaticPortMapping": false}},
+		{"/Startup/Complete", map[string]any{}},
+	}
+	for _, step := range steps {
+		if err := jellyfinJSONAt(ctx, client, baseURL, http.MethodPost, step.path, "", step.body, nil, http.StatusNoContent); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func reconcileJellyfinPaths(ctx context.Context, client *http.Client, accessToken string, current []string, directories []protocol.SharedDirectory) error {

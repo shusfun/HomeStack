@@ -12,11 +12,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
 const (
-	FileBrowserVersion            = "0.3.5"
+	FileBrowserVersion            = "1.5.1-stable"
 	JellyfinVersion               = "10.11.11"
 	FFmpegVersion                 = "7.1.4-3"
 	managedContentDownloadTimeout = 60 * time.Minute
@@ -51,45 +52,103 @@ func Prepare(ctx context.Context, stateDir, manifestURL string, publicKey ed2551
 	if fileArtifact.Version != FileBrowserVersion || mediaArtifact.Version != JellyfinVersion || ffmpegArtifact.Version != FFmpegVersion {
 		return Profile{}, fmt.Errorf("组件清单版本与应用契约不一致: filebrowser=%s jellyfin=%s ffmpeg=%s", fileArtifact.Version, mediaArtifact.Version, ffmpegArtifact.Version)
 	}
-	installer := Installer{Client: client, Root: filepath.Join(stateDir, "components")}
-	fileBrowser, err := installer.Ensure(ctx, fileArtifact)
-	if err != nil {
-		return Profile{}, err
-	}
-	jellyfin, err := installer.Ensure(ctx, mediaArtifact)
-	if err != nil {
-		return Profile{}, err
-	}
-	ffmpeg, err := installer.Ensure(ctx, ffmpegArtifact)
-	if err != nil {
-		return Profile{}, err
-	}
-	mediaPassword, err := randomSecret()
-	if err != nil {
-		return Profile{}, err
-	}
 	managedState := filepath.Join(stateDir, "managed")
-	profile := Profile{SchemaVersion: ProfileSchema, StateDir: managedState, FileRoot: filepath.Join(managedState, "filebrowser", "root"), FileBrowser: fileBrowser, Jellyfin: jellyfin, FFmpeg: ffmpeg, JellyfinPassword: mediaPassword, ModuleSecrets: map[string]map[string]string{}}
+	mediaPassword, moduleSecrets := existingManagedCredentials(existing, managedState)
+	installer := Installer{Client: client, Root: filepath.Join(stateDir, "components")}
+	fileBrowser, err := ensureCurrentInstallation(ctx, installer, fileArtifact, existingInstallation(existing, "filebrowser"))
+	if err != nil {
+		return Profile{}, err
+	}
+	jellyfin, err := ensureCurrentInstallation(ctx, installer, mediaArtifact, existingInstallation(existing, "jellyfin"))
+	if err != nil {
+		return Profile{}, err
+	}
+	ffmpeg, err := ensureCurrentInstallation(ctx, installer, ffmpegArtifact, existingInstallation(existing, "jellyfin-ffmpeg"))
+	if err != nil {
+		return Profile{}, err
+	}
+	if mediaPassword == "" {
+		mediaPassword, err = randomSecret()
+		if err != nil {
+			return Profile{}, err
+		}
+	}
+	profile := Profile{SchemaVersion: ProfileSchema, StateDir: managedState, FileRoot: filepath.Join(managedState, "filebrowser", "root"), FileBrowser: fileBrowser, Jellyfin: jellyfin, FFmpeg: ffmpeg, JellyfinPassword: mediaPassword, ModuleSecrets: moduleSecrets}
 	if err := ValidateProfile(profile); err != nil {
 		return Profile{}, err
 	}
 	return profile, nil
 }
 
+func existingInstallation(profile *Profile, component string) Installation {
+	if profile == nil {
+		return Installation{}
+	}
+	switch component {
+	case "filebrowser":
+		return profile.FileBrowser
+	case "jellyfin":
+		return profile.Jellyfin
+	case "jellyfin-ffmpeg":
+		return profile.FFmpeg
+	default:
+		return Installation{}
+	}
+}
+
+func ensureCurrentInstallation(ctx context.Context, installer Installer, artifact Artifact, existing Installation) (Installation, error) {
+	if validateInstallation(existing, artifact.Component, artifact.Version) == nil && strings.EqualFold(existing.ArtifactSHA256, artifact.SHA256) {
+		return existing, nil
+	}
+	return installer.Ensure(ctx, artifact)
+}
+
+func existingManagedCredentials(existing *Profile, managedState string) (string, map[string]map[string]string) {
+	secrets := make(map[string]map[string]string)
+	if existing == nil || existing.SchemaVersion != ProfileSchema || filepath.Clean(existing.StateDir) != filepath.Clean(managedState) || existing.JellyfinPassword == "" {
+		return "", secrets
+	}
+	for module, values := range existing.ModuleSecrets {
+		secrets[module] = make(map[string]string, len(values))
+		for name, value := range values {
+			secrets[module][name] = value
+		}
+	}
+	return existing.JellyfinPassword, secrets
+}
+
 func ValidateProfile(profile Profile) error {
 	if profile.SchemaVersion != ProfileSchema {
 		return fmt.Errorf("托管内容档案 schema 不受支持: %d", profile.SchemaVersion)
 	}
-	if !filepath.IsAbs(profile.StateDir) || !filepath.IsAbs(profile.FileRoot) || profile.FileBrowser.Component != "filebrowser" || profile.FileBrowser.Version != FileBrowserVersion || profile.Jellyfin.Component != "jellyfin" || profile.Jellyfin.Version != JellyfinVersion || profile.FFmpeg.Component != "jellyfin-ffmpeg" || profile.FFmpeg.Version != FFmpegVersion || profile.JellyfinPassword == "" {
+	if !filepath.IsAbs(profile.StateDir) || !filepath.IsAbs(profile.FileRoot) || profile.JellyfinPassword == "" {
 		return errors.New("托管内容档案不完整")
 	}
-	for _, installation := range []Installation{profile.FileBrowser, profile.Jellyfin, profile.FFmpeg} {
-		digest, err := hex.DecodeString(installation.ArtifactSHA256)
-		if err != nil || len(digest) != sha256.Size {
-			return errors.New("托管组件档案缺少有效的资产摘要")
+	for _, expected := range []struct {
+		installation Installation
+		component    string
+		version      string
+	}{{profile.FileBrowser, "filebrowser", FileBrowserVersion}, {profile.Jellyfin, "jellyfin", JellyfinVersion}, {profile.FFmpeg, "jellyfin-ffmpeg", FFmpegVersion}} {
+		if err := validateInstallation(expected.installation, expected.component, expected.version); err != nil {
+			return err
 		}
 	}
-	for _, path := range []string{profile.FileBrowser.Executable, profile.Jellyfin.Executable, profile.Jellyfin.WebDir, profile.FFmpeg.Executable} {
+	return nil
+}
+
+func validateInstallation(installation Installation, component, version string) error {
+	if installation.Component != component || installation.Version != version {
+		return errors.New("托管内容档案不完整")
+	}
+	digest, err := hex.DecodeString(installation.ArtifactSHA256)
+	if err != nil || len(digest) != sha256.Size {
+		return errors.New("托管组件档案缺少有效的资产摘要")
+	}
+	paths := []string{installation.Executable}
+	if component == "jellyfin" {
+		paths = append(paths, installation.WebDir)
+	}
+	for _, path := range paths {
 		if !filepath.IsAbs(path) {
 			return errors.New("托管内容档案包含非绝对路径")
 		}
@@ -97,7 +156,7 @@ func ValidateProfile(profile Profile) error {
 		if err != nil {
 			return fmt.Errorf("托管内容文件不可用: %w", err)
 		}
-		if path == profile.Jellyfin.WebDir {
+		if component == "jellyfin" && path == installation.WebDir {
 			if !info.IsDir() {
 				return errors.New("Jellyfin Web 路径不是目录")
 			}

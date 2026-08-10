@@ -92,6 +92,7 @@ func Run() error {
 		}
 	}
 	moduleSecrets := profile.Credential.ModuleSecrets
+	managedModuleVersions := map[string]string(nil)
 	if os.Getenv("HOMESTACK_NODE_PROFILE_SOURCE") == "keyring" && hasManagedContent(config) {
 		if profile.ManagedContent == nil {
 			return errors.New("设备配置启用了托管内容，但 Keyring 中缺少托管档案")
@@ -100,11 +101,19 @@ func Run() error {
 			return fmt.Errorf("启动托管文件与影视失败: %w", err)
 		}
 		moduleSecrets = profile.ManagedContent.ModuleSecrets
+		managedModuleVersions = map[string]string{
+			"filebrowser": profile.ManagedContent.FileBrowser.Version,
+			"jellyfin":    profile.ManagedContent.Jellyfin.Version,
+		}
 		if err := securestore.SaveDeviceProfile(profile); err != nil {
 			return fmt.Errorf("保存托管内容凭据失败: %w", err)
 		}
 	}
-	server, err := agent.NewServer(agent.ServerOptions{DeviceID: profile.DeviceID, DeviceName: profile.DeviceName, ConfigStore: configStore, Sessions: sessions, Tailnet: tailnet, ModuleSecrets: moduleSecrets, Updater: updater})
+	server, err := agent.NewServer(agent.ServerOptions{
+		DeviceID: profile.DeviceID, DeviceName: profile.DeviceName, ConfigStore: configStore,
+		Sessions: sessions, Tailnet: tailnet, ModuleSecrets: moduleSecrets,
+		ManagedModuleVersions: managedModuleVersions, Updater: updater,
+	})
 	if err != nil {
 		return err
 	}

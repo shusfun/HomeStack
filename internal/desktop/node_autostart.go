@@ -2,9 +2,11 @@ package desktop
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"html"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -100,7 +102,11 @@ func configureLaunchAgent(executable, tailscaleBinary string) error {
 	if err != nil {
 		return err
 	}
-	content := launchAgentContent(executable, tailscaleBinary, stdoutPath, stderrPath)
+	executableFingerprint, err := fileSHA256(executable)
+	if err != nil {
+		return fmt.Errorf("计算 HomeStack App 指纹失败: %w", err)
+	}
+	content := launchAgentContent(executable, executableFingerprint, tailscaleBinary, stdoutPath, stderrPath)
 	unchanged, err := sameUserFile(path, content, 0o600)
 	if err != nil {
 		return err
@@ -123,8 +129,21 @@ func configureLaunchAgent(executable, tailscaleBinary string) error {
 	return runStartupCommand("launchctl", "bootstrap", domain, path)
 }
 
-func launchAgentContent(executable, tailscaleBinary, stdoutPath, stderrPath string) []byte {
-	return []byte(fmt.Sprintf("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"https://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>Label</key><string>%s</string><key>ProgramArguments</key><array><string>%s</string><string>--node</string></array><key>EnvironmentVariables</key><dict><key>%s</key><string>%s</string><key>TERM</key><string>xterm-256color</string></dict><key>StandardOutPath</key><string>%s</string><key>StandardErrorPath</key><string>%s</string><key>RunAtLoad</key><true/><key>KeepAlive</key><true/></dict></plist>\n", nodeLabel, html.EscapeString(executable), tailscale.BinaryEnvironment, html.EscapeString(tailscaleBinary), html.EscapeString(stdoutPath), html.EscapeString(stderrPath)))
+func launchAgentContent(executable, executableFingerprint, tailscaleBinary, stdoutPath, stderrPath string) []byte {
+	return []byte(fmt.Sprintf("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"https://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>Label</key><string>%s</string><key>ProgramArguments</key><array><string>%s</string><string>--node</string></array><key>EnvironmentVariables</key><dict><key>HOMESTACK_NODE_EXECUTABLE_SHA256</key><string>%s</string><key>%s</key><string>%s</string><key>TERM</key><string>xterm-256color</string></dict><key>StandardOutPath</key><string>%s</string><key>StandardErrorPath</key><string>%s</string><key>RunAtLoad</key><true/><key>KeepAlive</key><true/></dict></plist>\n", nodeLabel, html.EscapeString(executable), html.EscapeString(executableFingerprint), tailscale.BinaryEnvironment, html.EscapeString(tailscaleBinary), html.EscapeString(stdoutPath), html.EscapeString(stderrPath)))
+}
+
+func fileSHA256(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", hash.Sum(nil)), nil
 }
 
 func prepareNodeLogs(home string) (string, string, error) {

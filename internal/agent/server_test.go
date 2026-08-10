@@ -29,6 +29,21 @@ func (failingMetricsSystem) Logs(context.Context, string, int, string) (LogPage,
 	return LogPage{}, nil
 }
 
+type managedServicesSystem struct {
+	services []ServiceStatus
+}
+
+func (s managedServicesSystem) Metrics(context.Context) (SystemMetrics, error) {
+	return SystemMetrics{}, nil
+}
+func (s managedServicesSystem) Services(context.Context) ([]ServiceStatus, error) {
+	return s.services, nil
+}
+func (managedServicesSystem) Action(context.Context, string, string) error { return nil }
+func (managedServicesSystem) Logs(context.Context, string, int, string) (LogPage, error) {
+	return LogPage{}, nil
+}
+
 type staticTailnet struct{ status tailscale.Status }
 
 func (s staticTailnet) Status(context.Context) (tailscale.Status, error) { return s.status, nil }
@@ -152,6 +167,48 @@ func TestBuildStatusKeepsContentCapabilitiesWhenMetricsFail(t *testing.T) {
 	}
 	if states["files"].State != "ready" || states["media"].State != "disabled" || states["system"].State != "error" || !strings.Contains(states["system"].Detail, "指标采集失败") {
 		t.Fatalf("能力状态未独立表达: %+v", status.Capabilities)
+	}
+}
+
+func TestBuildStatusUsesManagedVersionsAndLoopbackServiceState(t *testing.T) {
+	root := t.TempDir()
+	config := protocol.SignedDeviceConfig{
+		DeviceID: "device-1", Revision: 4, ExpiresAt: time.Now().UTC().Add(time.Hour),
+		SharedDirectories: []protocol.SharedDirectory{{ID: "docs", Name: "文档", Path: root}},
+		Modules: []protocol.ModuleConfig{
+			{ID: "filebrowser", Enabled: true},
+			{ID: "jellyfin", Enabled: true, BaseURL: "http://127.0.0.1:19446"},
+		},
+	}
+	server := &Server{
+		deviceID: "device-1", deviceName: "设备", configStore: &ConfigStore{current: config},
+		tailnet:               staticTailnet{status: tailscale.Status{Online: true}},
+		managedModuleVersions: map[string]string{"filebrowser": "1.5.1-stable", "jellyfin": "10.11.11"},
+		system: managedServicesSystem{services: []ServiceStatus{
+			{ID: "filebrowser", State: "active", Detail: "127.0.0.1:19445"},
+			{ID: "jellyfin", State: "inactive", Detail: "回环端口未监听"},
+		}},
+		files: NewFileService(config.SharedDirectories),
+	}
+	status, err := server.BuildStatus(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(status.Modules) != 2 {
+		t.Fatalf("托管模块状态数量错误: %+v", status.Modules)
+	}
+	if status.Modules[0].State != "ready" || status.Modules[0].Version != "1.5.1-stable" || status.Modules[0].ExpectedVersion != "1.5.1-stable" {
+		t.Fatalf("FileBrowser 托管状态错误: %+v", status.Modules[0])
+	}
+	if status.Modules[1].State != "error" || status.Modules[1].Version != "10.11.11" || !strings.Contains(status.Modules[1].Detail, "未监听") {
+		t.Fatalf("Jellyfin 托管状态错误: %+v", status.Modules[1])
+	}
+	capabilities := map[string]protocol.CapabilityStatus{}
+	for _, capability := range status.Capabilities {
+		capabilities[capability.ID] = capability
+	}
+	if capabilities["files"].State != "ready" || capabilities["media"].State != "error" || !strings.Contains(capabilities["media"].Detail, "未监听") {
+		t.Fatalf("托管能力状态错误: %+v", status.Capabilities)
 	}
 }
 

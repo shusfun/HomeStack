@@ -1,11 +1,11 @@
 package tailscale
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -43,6 +43,16 @@ type rawStatus struct {
 		CurAddr string `json:"CurAddr"`
 		Relay   string `json:"Relay"`
 	} `json:"Peer"`
+}
+
+type rawServeConfig struct {
+	TCP map[string]json.RawMessage `json:"TCP"`
+	Web map[string]struct {
+		Handlers map[string]struct {
+			Proxy string `json:"Proxy"`
+		} `json:"Handlers"`
+	} `json:"Web"`
+	AllowFunnel map[string]bool `json:"AllowFunnel"`
 }
 
 func New() (*Client, error) {
@@ -140,21 +150,15 @@ func (c *Client) EnsureServe(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("读取 Tailscale Serve 配置失败: %w", err)
 	}
-	var serveConfig any
-	if len(bytes.TrimSpace(serve)) > 0 && !bytes.Equal(bytes.TrimSpace(serve), []byte("null")) {
-		if err := json.Unmarshal(serve, &serveConfig); err != nil {
-			return fmt.Errorf("解析 Tailscale Serve 配置失败: %w", err)
-		}
+	var config rawServeConfig
+	if err := json.Unmarshal(serve, &config); err != nil {
+		return fmt.Errorf("解析 Tailscale Serve 配置失败: %w", err)
 	}
-	funnel, err := c.run(commandCtx, "funnel", "status", "--json")
-	if err != nil {
-		return fmt.Errorf("读取 Tailscale Funnel 配置失败: %w", err)
-	}
-	if containsPort(funnel, "19443") {
+	if config.funnelEnabled("19443") {
 		return errors.New("Tailscale Funnel 已占用 19443，拒绝暴露 HomeStack Node")
 	}
-	if containsPort(serve, "19443") {
-		if bytes.Contains(serve, []byte("127.0.0.1:19444")) {
+	if _, occupied := config.TCP["19443"]; occupied {
+		if config.proxy("19443", "/") == "http://127.0.0.1:19444" {
 			return nil
 		}
 		return errors.New("Tailscale Serve 端口 19443 已被其他服务占用")
@@ -165,16 +169,24 @@ func (c *Client) EnsureServe(ctx context.Context) error {
 	return nil
 }
 
-func containsPort(data []byte, port string) bool {
-	if len(bytes.TrimSpace(data)) == 0 || bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
-		return false
+func (c rawServeConfig) funnelEnabled(port string) bool {
+	for hostPort, enabled := range c.AllowFunnel {
+		_, candidate, err := net.SplitHostPort(hostPort)
+		if err == nil && candidate == port && enabled {
+			return true
+		}
 	}
-	var value any
-	if json.Unmarshal(data, &value) != nil {
-		return false
+	return false
+}
+
+func (c rawServeConfig) proxy(port, path string) string {
+	for hostPort, web := range c.Web {
+		_, candidate, err := net.SplitHostPort(hostPort)
+		if err == nil && candidate == port {
+			return web.Handlers[path].Proxy
+		}
 	}
-	encoded, _ := json.Marshal(value)
-	return bytes.Contains(encoded, []byte(port))
+	return ""
 }
 
 func (c *Client) run(ctx context.Context, arguments ...string) ([]byte, error) {

@@ -26,28 +26,30 @@ type TailnetStatus interface {
 }
 
 type ServerOptions struct {
-	DeviceID      string
-	DeviceName    string
-	ConfigStore   *ConfigStore
-	Sessions      *SessionStore
-	Tailnet       TailnetStatus
-	ModuleSecrets map[string]map[string]string
-	System        SystemManager
-	Updater       Updater
+	DeviceID              string
+	DeviceName            string
+	ConfigStore           *ConfigStore
+	Sessions              *SessionStore
+	Tailnet               TailnetStatus
+	ModuleSecrets         map[string]map[string]string
+	ManagedModuleVersions map[string]string
+	System                SystemManager
+	Updater               Updater
 }
 
 type Server struct {
-	deviceID    string
-	deviceName  string
-	configStore *ConfigStore
-	sessions    *SessionStore
-	tailnet     TailnetStatus
-	proxyMu     sync.RWMutex
-	secrets     map[string]map[string]string
-	files       *FileService
-	mediaProxy  http.Handler
-	system      SystemManager
-	updater     Updater
+	deviceID              string
+	deviceName            string
+	configStore           *ConfigStore
+	sessions              *SessionStore
+	tailnet               TailnetStatus
+	proxyMu               sync.RWMutex
+	secrets               map[string]map[string]string
+	managedModuleVersions map[string]string
+	files                 *FileService
+	mediaProxy            http.Handler
+	system                SystemManager
+	updater               Updater
 }
 
 func NewServer(options ServerOptions) (*Server, error) {
@@ -60,7 +62,8 @@ func NewServer(options ServerOptions) (*Server, error) {
 	}
 	server := &Server{
 		deviceID: options.DeviceID, deviceName: options.DeviceName, configStore: options.ConfigStore,
-		sessions: options.Sessions, tailnet: options.Tailnet, secrets: options.ModuleSecrets, system: options.System, updater: options.Updater,
+		sessions: options.Sessions, tailnet: options.Tailnet, secrets: options.ModuleSecrets,
+		managedModuleVersions: options.ManagedModuleVersions, system: options.System, updater: options.Updater,
 	}
 	if server.system == nil {
 		system, err := newDefaultSystemManager()
@@ -329,6 +332,7 @@ func (s *Server) BuildStatus(ctx context.Context) (protocol.DeviceStatus, error)
 		return protocol.DeviceStatus{}, errors.New("Agent 签名配置已过期")
 	}
 	statuses := make([]protocol.ModuleStatus, 0, len(config.Modules))
+	statusModuleIDs := make([]string, 0, len(config.Modules))
 	for _, module := range config.Modules {
 		if !module.Enabled {
 			continue
@@ -337,8 +341,50 @@ func (s *Server) BuildStatus(ctx context.Context) (protocol.DeviceStatus, error)
 		if err != nil {
 			return protocol.DeviceStatus{}, err
 		}
-		statuses = append(statuses, components.Check(ctx, spec))
+		if version, managed := s.managedModuleVersions[module.ID]; managed {
+			status := protocol.ModuleStatus{ID: spec.ID, State: "ready", Version: version, ExpectedVersion: spec.ExpectedVersion, CheckedAt: time.Now().UTC()}
+			if version != spec.ExpectedVersion {
+				status.State = "version_mismatch"
+				status.Detail = "托管组件版本与固定版本不一致"
+			}
+			statuses = append(statuses, status)
+		} else {
+			statuses = append(statuses, components.Check(ctx, spec))
+		}
 		statuses[len(statuses)-1].ID = ModuleKey(module)
+		statusModuleIDs = append(statusModuleIDs, module.ID)
+	}
+	var managedServices map[string]ServiceStatus
+	if len(s.managedModuleVersions) > 0 {
+		managedServices = make(map[string]ServiceStatus)
+		servicesContext, servicesCancel := context.WithTimeout(ctx, 3*time.Second)
+		services, servicesErr := s.system.Services(servicesContext)
+		servicesCancel()
+		if servicesErr != nil {
+			for index, moduleID := range statusModuleIDs {
+				if _, managed := s.managedModuleVersions[moduleID]; managed {
+					statuses[index].State = "error"
+					statuses[index].Detail = servicesErr.Error()
+				}
+			}
+		} else {
+			for _, service := range services {
+				managedServices[service.ID] = service
+			}
+			for index, moduleID := range statusModuleIDs {
+				if _, managed := s.managedModuleVersions[moduleID]; !managed {
+					continue
+				}
+				service, exists := managedServices[moduleID]
+				if !exists {
+					statuses[index].State = "error"
+					statuses[index].Detail = "托管组件服务状态缺失"
+				} else if service.State != "active" {
+					statuses[index].State = "error"
+					statuses[index].Detail = service.Detail
+				}
+			}
+		}
 	}
 	capabilities := []protocol.CapabilityStatus{{ID: "files", State: "disabled", Detail: "未配置共享目录"}, {ID: "media", State: "disabled", Detail: "Jellyfin 未启用"}, {ID: "system", State: "ready"}}
 	if len(config.SharedDirectories) > 0 {
@@ -362,7 +408,8 @@ func (s *Server) BuildStatus(ctx context.Context) (protocol.DeviceStatus, error)
 			capabilities[1] = protocol.CapabilityStatus{ID: "media", State: state, Detail: status.Detail}
 		}
 	}
-	if capabilities[1].State == "ready" {
+	_, managedJellyfin := s.managedModuleVersions["jellyfin"]
+	if capabilities[1].State == "ready" && !managedJellyfin {
 		servicesContext, servicesCancel := context.WithTimeout(ctx, 3*time.Second)
 		services, servicesErr := s.system.Services(servicesContext)
 		servicesCancel()

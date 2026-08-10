@@ -8,11 +8,32 @@ import (
 )
 
 func TestLaunchAgentPinsTailscaleBinaryAndEscapesPaths(t *testing.T) {
-	content := string(launchAgentContent("/Applications/Home & Stack.app/HomeStack", "/Applications/Tailscale.app/Contents/MacOS/Tailscale", "/Users/test/Library/Logs/HomeStack/node.stdout.log", "/Users/test/Library/Logs/HomeStack/node.stderr.log"))
-	for _, expected := range []string{"HOMESTACK_TAILSCALE_BINARY", "/Applications/Tailscale.app/Contents/MacOS/Tailscale", "/Applications/Home &amp; Stack.app/HomeStack", "<string>--node</string>", "<key>TERM</key><string>xterm-256color</string>", "StandardOutPath", "node.stdout.log", "StandardErrorPath", "node.stderr.log"} {
+	content := string(launchAgentContent("/Applications/Home & Stack.app/HomeStack", "desktop-sha256", "/Applications/Tailscale.app/Contents/MacOS/Tailscale", "/Users/test/Library/Logs/HomeStack/node.stdout.log", "/Users/test/Library/Logs/HomeStack/node.stderr.log"))
+	for _, expected := range []string{"HOMESTACK_NODE_EXECUTABLE_SHA256", "desktop-sha256", "HOMESTACK_TAILSCALE_BINARY", "/Applications/Tailscale.app/Contents/MacOS/Tailscale", "/Applications/Home &amp; Stack.app/HomeStack", "<string>--node</string>", "<key>TERM</key><string>xterm-256color</string>", "StandardOutPath", "node.stdout.log", "StandardErrorPath", "node.stderr.log"} {
 		if !strings.Contains(content, expected) {
 			t.Fatalf("LaunchAgent 缺少 %q: %s", expected, content)
 		}
+	}
+}
+
+func TestFileSHA256ChangesWithExecutableContent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "HomeStack")
+	if err := os.WriteFile(path, []byte("old"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oldFingerprint, err := fileSHA256(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("new"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	newFingerprint, err := fileSHA256(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if oldFingerprint == newFingerprint {
+		t.Fatal("可执行文件内容变化后指纹未变化")
 	}
 }
 
