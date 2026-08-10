@@ -87,7 +87,18 @@ func Start(ctx context.Context, profile *Profile, directories []protocol.SharedD
 		runtime.stop()
 		return nil, err
 	}
-	token, err := configureJellyfin(ctx, client, profile.JellyfinPassword, directories, startupConfigurationReady)
+	existingAPIKey := ""
+	if values := profile.ModuleSecrets["jellyfin"]; values != nil {
+		existingAPIKey = values["api_key"]
+	}
+	if !startupConfigurationReady && existingAPIKey == "" {
+		existingAPIKey, err = recoverJellyfinAPIKey(ctx, profile.StateDir)
+		if err != nil {
+			runtime.stop()
+			return nil, err
+		}
+	}
+	token, err := configureJellyfin(ctx, client, profile.JellyfinPassword, existingAPIKey, directories, startupConfigurationReady)
 	if err != nil {
 		runtime.stop()
 		return nil, err
@@ -384,30 +395,35 @@ func waitForJellyfinStartupConfiguration(ctx context.Context, client *http.Clien
 	}
 }
 
-func configureJellyfin(ctx context.Context, client *http.Client, password string, directories []protocol.SharedDirectory, startupConfigurationReady bool) (string, error) {
+func configureJellyfin(ctx context.Context, client *http.Client, password, existingAPIKey string, directories []protocol.SharedDirectory, startupConfigurationReady bool) (string, error) {
+	accessToken, apiKey := existingAPIKey, existingAPIKey
 	if startupConfigurationReady {
 		if err := configureJellyfinStartup(ctx, client, JellyfinURL, password); err != nil {
 			return "", err
 		}
-	}
-	var auth struct {
-		AccessToken string `json:"AccessToken"`
-	}
-	if err := jellyfinJSON(ctx, client, http.MethodPost, "/Users/AuthenticateByName", "", map[string]string{"Username": "homestack", "Pw": password}, &auth, http.StatusOK); err != nil {
-		return "", err
-	}
-	if auth.AccessToken == "" {
-		return "", errors.New("Jellyfin 登录响应缺少访问令牌")
-	}
-	apiKey, err := ensureJellyfinAPIKey(ctx, client, auth.AccessToken)
-	if err != nil {
-		return "", err
+		var auth struct {
+			AccessToken string `json:"AccessToken"`
+		}
+		if err := jellyfinJSON(ctx, client, http.MethodPost, "/Users/AuthenticateByName", "", map[string]string{"Username": "homestack", "Pw": password}, &auth, http.StatusOK); err != nil {
+			return "", err
+		}
+		if auth.AccessToken == "" {
+			return "", errors.New("Jellyfin 登录响应缺少访问令牌")
+		}
+		accessToken = auth.AccessToken
+		var err error
+		apiKey, err = ensureJellyfinAPIKey(ctx, client, accessToken)
+		if err != nil {
+			return "", err
+		}
+	} else if existingAPIKey == "" {
+		return "", errors.New("已配置的 Jellyfin 缺少 HomeStack API Key")
 	}
 	var folders []struct {
 		Name      string   `json:"Name"`
 		Locations []string `json:"Locations"`
 	}
-	if err := jellyfinJSON(ctx, client, http.MethodGet, "/Library/VirtualFolders", auth.AccessToken, nil, &folders, http.StatusOK); err != nil {
+	if err := jellyfinJSON(ctx, client, http.MethodGet, "/Library/VirtualFolders", accessToken, nil, &folders, http.StatusOK); err != nil {
 		return "", err
 	}
 	libraryClient := *client
@@ -427,10 +443,10 @@ func configureJellyfin(ctx context.Context, client *http.Client, password string
 		}
 		query := url.Values{"name": {"HomeStack"}, "collectionType": {"mixed"}, "refreshLibrary": {"true"}}
 		body := map[string]any{"LibraryOptions": map[string]any{"PathInfos": pathInfos}}
-		if err := jellyfinJSON(ctx, &libraryClient, http.MethodPost, "/Library/VirtualFolders?"+query.Encode(), auth.AccessToken, body, nil, http.StatusNoContent); err != nil {
+		if err := jellyfinJSON(ctx, &libraryClient, http.MethodPost, "/Library/VirtualFolders?"+query.Encode(), accessToken, body, nil, http.StatusNoContent); err != nil {
 			return "", err
 		}
-	} else if err := reconcileJellyfinPaths(ctx, &libraryClient, auth.AccessToken, currentPaths, directories); err != nil {
+	} else if err := reconcileJellyfinPaths(ctx, &libraryClient, accessToken, currentPaths, directories); err != nil {
 		return "", err
 	}
 	return apiKey, nil

@@ -3,6 +3,7 @@ package managed
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"encoding/xml"
 	"errors"
@@ -440,5 +441,143 @@ func TestJellyfinTimeoutsKeepHealthRequestsShortAndLibraryOperationsLong(t *test
 	}
 	if jellyfinLibraryTimeout != 2*time.Minute {
 		t.Fatalf("Jellyfin 媒体库操作超时错误: %s", jellyfinLibraryTimeout)
+	}
+}
+
+func TestConfigureJellyfinReusesExistingAPIKeyWithoutPasswordLogin(t *testing.T) {
+	requests := []string{}
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requests = append(requests, request.Method+" "+request.URL.Path)
+		if request.Header.Get("X-Emby-Token") != "existing-api-key" {
+			t.Fatalf("Jellyfin 请求未使用既有 API Key: %s", request.URL.Path)
+		}
+		switch request.Method + " " + request.URL.Path {
+		case "GET /Library/VirtualFolders":
+			return jsonResponse(http.StatusOK, `[{"Name":"HomeStack","Locations":["/media"]}]`), nil
+		default:
+			return jsonResponse(http.StatusNotFound, `{"error":"unexpected"}`), nil
+		}
+	})}
+	directories := []protocol.SharedDirectory{{ID: "media", Name: "影视", Path: "/media"}}
+	apiKey, err := configureJellyfin(t.Context(), client, "stale-password", "existing-api-key", directories, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if apiKey != "existing-api-key" || len(requests) != 1 || requests[0] != "GET /Library/VirtualFolders" {
+		t.Fatalf("既有 API Key 迁移执行了多余认证: key=%v requests=%v", apiKey != "", requests)
+	}
+}
+
+func TestConfigureJellyfinDoesNotFallbackWhenExistingAPIKeyIsRejected(t *testing.T) {
+	requests := []string{}
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requests = append(requests, request.Method+" "+request.URL.Path)
+		return jsonResponse(http.StatusUnauthorized, `{"error":"invalid api key"}`), nil
+	})}
+	_, err := configureJellyfin(t.Context(), client, "password-must-not-be-used", "invalid-api-key", []protocol.SharedDirectory{{ID: "media", Name: "影视", Path: "/media"}}, false)
+	if err == nil || !strings.Contains(err.Error(), "/Library/VirtualFolders 返回 HTTP 401") {
+		t.Fatalf("无效 API Key 未返回真实错误: %v", err)
+	}
+	if len(requests) != 1 || requests[0] != "GET /Library/VirtualFolders" {
+		t.Fatalf("无效 API Key 后不应降级到密码认证: %v", requests)
+	}
+}
+
+func TestConfigureJellyfinDoesNotUsePasswordWhenConfiguredAPIKeyIsMissing(t *testing.T) {
+	requestCount := 0
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requestCount++
+		return jsonResponse(http.StatusInternalServerError, `{}`), nil
+	})}
+	_, err := configureJellyfin(t.Context(), client, "password-must-not-be-used", "", []protocol.SharedDirectory{{ID: "media", Name: "影视", Path: "/media"}}, false)
+	if err == nil || !strings.Contains(err.Error(), "缺少 HomeStack API Key") {
+		t.Fatalf("缺失 API Key 未返回真实错误: %v", err)
+	}
+	if requestCount != 0 {
+		t.Fatalf("缺失 API Key 后不应执行密码认证: requests=%d", requestCount)
+	}
+}
+
+func TestRecoverJellyfinAPIKeyFromConfiguredDatabase(t *testing.T) {
+	stateDir := createJellyfinAPIKeyDatabase(t, []string{"recovered-api-key"})
+	apiKey, err := recoverJellyfinAPIKey(t.Context(), stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if apiKey != "recovered-api-key" {
+		t.Fatal("未恢复预期的 Jellyfin API Key")
+	}
+}
+
+func TestRecoverJellyfinAPIKeyRejectsMissingOrAmbiguousCredentials(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		keys    []string
+		message string
+	}{
+		{name: "missing", keys: nil, message: "未找到 HomeStack API Key"},
+		{name: "empty", keys: []string{""}, message: "API Key 为空"},
+		{name: "ambiguous", keys: []string{"first-secret", "second-secret"}, message: "存在多个 HomeStack API Key"},
+		{name: "ambiguous with empty first key", keys: []string{"", "second-secret"}, message: "存在多个 HomeStack API Key"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			stateDir := createJellyfinAPIKeyDatabase(t, test.keys)
+			_, err := recoverJellyfinAPIKey(t.Context(), stateDir)
+			if err == nil || !strings.Contains(err.Error(), test.message) {
+				t.Fatalf("凭据异常未返回预期错误: %v", err)
+			}
+			for _, key := range test.keys {
+				if key != "" && strings.Contains(err.Error(), key) {
+					t.Fatal("凭据恢复错误泄露了 API Key")
+				}
+			}
+		})
+	}
+}
+
+func TestSQLiteReadOnlyDSNRejectsWrites(t *testing.T) {
+	stateDir := createJellyfinAPIKeyDatabase(t, []string{"existing-key"})
+	dsn, err := sqliteReadOnlyDSN(filepath.Join(stateDir, "jellyfin", "data", "data", "jellyfin.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.Exec(`DELETE FROM "ApiKeys"`); err == nil {
+		t.Fatal("Jellyfin 凭据迁移数据库连接允许写入")
+	}
+}
+
+func createJellyfinAPIKeyDatabase(t *testing.T, keys []string) string {
+	t.Helper()
+	stateDir := t.TempDir()
+	databaseDir := filepath.Join(stateDir, "jellyfin", "data", "data")
+	if err := os.MkdirAll(databaseDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	database, err := sql.Open("sqlite", filepath.Join(databaseDir, "jellyfin.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	if _, err := database.Exec(`CREATE TABLE "ApiKeys" ("Name" TEXT NOT NULL, "AccessToken" TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range keys {
+		if _, err := database.Exec(`INSERT INTO "ApiKeys" ("Name", "AccessToken") VALUES (?, ?)`, "HomeStack", key); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return stateDir
+}
+
+func jsonResponse(status int, body string) *http.Response {
+	return &http.Response{
+		StatusCode: status,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(body)),
 	}
 }
