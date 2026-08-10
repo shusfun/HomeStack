@@ -213,6 +213,17 @@ func waitForJellyfinStartupConfiguration(ctx context.Context, client *http.Clien
 	timeout := time.NewTimer(startupTimeout)
 	defer timeout.Stop()
 	lastUnavailable := ""
+	sawServiceUnavailable := false
+	waitForRetry := func(detail string) error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timeout.C:
+			return fmt.Errorf("Jellyfin 启动后两分钟内未准备好 /Startup/Configuration: %s", detail)
+		case <-ticker.C:
+			return nil
+		}
+	}
 	for {
 		request, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/Startup/Configuration", nil)
 		if err != nil {
@@ -220,7 +231,14 @@ func waitForJellyfinStartupConfiguration(ctx context.Context, client *http.Clien
 		}
 		response, err := client.Do(request)
 		if err != nil {
-			return false, fmt.Errorf("请求 Jellyfin /Startup/Configuration 失败: %w", err)
+			if !sawServiceUnavailable {
+				return false, fmt.Errorf("请求 Jellyfin /Startup/Configuration 失败: %w", err)
+			}
+			lastUnavailable = err.Error()
+			if err := waitForRetry(lastUnavailable); err != nil {
+				return false, err
+			}
+			continue
 		}
 		if response.StatusCode == http.StatusOK {
 			var configuration map[string]any
@@ -248,13 +266,10 @@ func waitForJellyfinStartupConfiguration(ctx context.Context, client *http.Clien
 		if response.StatusCode != http.StatusServiceUnavailable {
 			return false, fmt.Errorf("Jellyfin /Startup/Configuration 返回 HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(detail)))
 		}
+		sawServiceUnavailable = true
 		lastUnavailable = strings.TrimSpace(string(detail))
-		select {
-		case <-ctx.Done():
-			return false, ctx.Err()
-		case <-timeout.C:
-			return false, fmt.Errorf("Jellyfin 启动后两分钟内未准备好 /Startup/Configuration: %s", lastUnavailable)
-		case <-ticker.C:
+		if err := waitForRetry(lastUnavailable); err != nil {
+			return false, err
 		}
 	}
 }

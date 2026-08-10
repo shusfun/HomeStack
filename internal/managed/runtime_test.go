@@ -2,13 +2,22 @@ package managed
 
 import (
 	"encoding/xml"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return function(request)
+}
 
 func TestWriteJellyfinNetworkConfigRestrictsToLoopback(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "network.xml")
@@ -110,5 +119,28 @@ func TestWaitForJellyfinStartupConfigurationAcceptsCompletedWizard(t *testing.T)
 	}
 	if ready {
 		t.Fatal("已完成向导的 Jellyfin 不应再次授权 Startup 写请求")
+	}
+}
+
+func TestWaitForJellyfinStartupConfigurationAllowsListenerHandoffAfter503(t *testing.T) {
+	requests := 0
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requests++
+		switch requests {
+		case 1:
+			return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: io.NopCloser(strings.NewReader("still starting")), Header: make(http.Header)}, nil
+		case 2:
+			return nil, errors.New("dial tcp 127.0.0.1:19446: connect: connection refused")
+		default:
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"UICulture":"zh-CN"}`)), Header: make(http.Header)}, nil
+		}
+	})}
+
+	ready, err := waitForJellyfinStartupConfiguration(t.Context(), client, "http://127.0.0.1:19446", time.Millisecond, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ready || requests != 3 {
+		t.Fatalf("Jellyfin 监听器切换后未恢复首次配置: ready=%v requests=%d", ready, requests)
 	}
 }
