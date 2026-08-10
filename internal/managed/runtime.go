@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -42,6 +43,9 @@ func Start(ctx context.Context, profile *Profile, directories []protocol.SharedD
 		if err := os.MkdirAll(filepath.Join(profile.StateDir, name), 0o700); err != nil {
 			return nil, err
 		}
+	}
+	if err := writeJellyfinNetworkConfig(filepath.Join(profile.StateDir, "jellyfin", "config", "network.xml")); err != nil {
+		return nil, err
 	}
 	fileConfig := filepath.Join(profile.StateDir, "filebrowser", "config.yaml")
 	if err := writeFileBrowserConfig(fileConfig, profile.FileRoot, profile); err != nil {
@@ -85,15 +89,61 @@ func Start(ctx context.Context, profile *Profile, directories []protocol.SharedD
 		profile.ModuleSecrets = make(map[string]map[string]string)
 	}
 	profile.ModuleSecrets["jellyfin"] = map[string]string{"api_key": token}
-	pathEntries := []string{filepath.Dir(profile.FileBrowser.Executable), filepath.Dir(profile.Jellyfin.Executable), filepath.Dir(profile.FFmpeg.Executable)}
-	if current := os.Getenv("PATH"); current != "" {
-		pathEntries = append(pathEntries, current)
-	}
-	if err := os.Setenv("PATH", strings.Join(pathEntries, string(os.PathListSeparator))); err != nil {
-		runtime.stop()
-		return nil, err
-	}
 	return runtime, nil
+}
+
+type jellyfinXMLStrings struct {
+	Values []string `xml:"string"`
+}
+
+type jellyfinNetworkConfiguration struct {
+	XMLName                           xml.Name           `xml:"NetworkConfiguration"`
+	BaseURL                           string             `xml:"BaseUrl"`
+	EnableHTTPS                       bool               `xml:"EnableHttps"`
+	RequireHTTPS                      bool               `xml:"RequireHttps"`
+	CertificatePath                   string             `xml:"CertificatePath"`
+	CertificatePassword               string             `xml:"CertificatePassword"`
+	InternalHTTPPort                  int                `xml:"InternalHttpPort"`
+	InternalHTTPSPort                 int                `xml:"InternalHttpsPort"`
+	PublicHTTPPort                    int                `xml:"PublicHttpPort"`
+	PublicHTTPSPort                   int                `xml:"PublicHttpsPort"`
+	AutoDiscovery                     bool               `xml:"AutoDiscovery"`
+	EnableIPv4                        bool               `xml:"EnableIPv4"`
+	EnableIPv6                        bool               `xml:"EnableIPv6"`
+	EnableRemoteAccess                bool               `xml:"EnableRemoteAccess"`
+	LocalNetworkSubnets               jellyfinXMLStrings `xml:"LocalNetworkSubnets"`
+	LocalNetworkAddresses             jellyfinXMLStrings `xml:"LocalNetworkAddresses"`
+	KnownProxies                      jellyfinXMLStrings `xml:"KnownProxies"`
+	IgnoreVirtualInterfaces           bool               `xml:"IgnoreVirtualInterfaces"`
+	VirtualInterfaceNames             jellyfinXMLStrings `xml:"VirtualInterfaceNames"`
+	EnablePublishedServerURIByRequest bool               `xml:"EnablePublishedServerUriByRequest"`
+	PublishedServerURIBySubnet        jellyfinXMLStrings `xml:"PublishedServerUriBySubnet"`
+	RemoteIPFilter                    jellyfinXMLStrings `xml:"RemoteIPFilter"`
+	IsRemoteIPFilterBlacklist         bool               `xml:"IsRemoteIPFilterBlacklist"`
+}
+
+func writeJellyfinNetworkConfig(path string) error {
+	configuration := jellyfinNetworkConfiguration{
+		InternalHTTPPort:        19446,
+		InternalHTTPSPort:       8920,
+		PublicHTTPPort:          19446,
+		PublicHTTPSPort:         8920,
+		EnableIPv4:              true,
+		EnableRemoteAccess:      false,
+		LocalNetworkAddresses:   jellyfinXMLStrings{Values: []string{"127.0.0.1"}},
+		IgnoreVirtualInterfaces: true,
+		VirtualInterfaceNames:   jellyfinXMLStrings{Values: []string{"veth"}},
+	}
+	data, err := xml.MarshalIndent(configuration, "", "  ")
+	if err != nil {
+		return fmt.Errorf("生成 Jellyfin 网络配置失败: %w", err)
+	}
+	data = append([]byte(xml.Header), data...)
+	data = append(data, '\n')
+	if err := atomicFile(path, data, 0o600); err != nil {
+		return fmt.Errorf("写入 Jellyfin 网络配置失败: %w", err)
+	}
+	return nil
 }
 
 func (r *Runtime) stop() {

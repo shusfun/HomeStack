@@ -17,11 +17,16 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/ulikunitz/xz"
 )
 
-const maxExtractedSize int64 = 2 << 30
+const (
+	maxExtractedSize            int64 = 2 << 30
+	componentDownloadAttempts         = 12
+	componentDownloadRetryDelay       = 250 * time.Millisecond
+)
 
 var installLock sync.Mutex
 
@@ -123,38 +128,102 @@ func loadInstallation(path string, artifact Artifact) (Installation, error) {
 }
 
 func downloadArtifact(ctx context.Context, client *http.Client, artifact Artifact, target string) error {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, artifact.URL, nil)
-	if err != nil {
-		return err
-	}
-	response, err := client.Do(request)
-	if err != nil {
-		return fmt.Errorf("下载 %s 失败: %w", artifact.Component, err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("下载 %s 失败: HTTP %d", artifact.Component, response.StatusCode)
-	}
 	file, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
 	hash := sha256.New()
-	written, copyErr := io.Copy(io.MultiWriter(file, hash), io.LimitReader(response.Body, artifact.Size+1))
-	closeErr := file.Close()
-	if copyErr != nil {
-		return fmt.Errorf("保存 %s 失败: %w", artifact.Component, copyErr)
+	offset := int64(0)
+	for attempt := 1; offset < artifact.Size; attempt++ {
+		request, requestErr := http.NewRequestWithContext(ctx, http.MethodGet, artifact.URL, nil)
+		if requestErr != nil {
+			_ = file.Close()
+			return requestErr
+		}
+		if offset > 0 {
+			request.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
+		}
+		response, requestErr := client.Do(request)
+		if requestErr != nil {
+			if attempt >= componentDownloadAttempts {
+				_ = file.Close()
+				return fmt.Errorf("下载 %s 失败（已接收 %d/%d 字节，尝试 %d 次）: %w", artifact.Component, offset, artifact.Size, attempt, requestErr)
+			}
+			if err := waitForDownloadRetry(ctx, attempt); err != nil {
+				_ = file.Close()
+				return err
+			}
+			continue
+		}
+		expectedStatus := http.StatusOK
+		if offset > 0 {
+			expectedStatus = http.StatusPartialContent
+		}
+		if response.StatusCode != expectedStatus {
+			_ = response.Body.Close()
+			_ = file.Close()
+			return fmt.Errorf("下载 %s 失败: HTTP %d", artifact.Component, response.StatusCode)
+		}
+		if offset > 0 {
+			expectedRange := fmt.Sprintf("bytes %d-%d/%d", offset, artifact.Size-1, artifact.Size)
+			if response.Header.Get("Content-Range") != expectedRange {
+				_ = response.Body.Close()
+				_ = file.Close()
+				return fmt.Errorf("下载 %s 的 Content-Range 无效", artifact.Component)
+			}
+		}
+		remaining := artifact.Size - offset
+		written, copyErr := io.Copy(io.MultiWriter(file, hash), io.LimitReader(response.Body, remaining+1))
+		closeErr := response.Body.Close()
+		offset += written
+		if written > remaining {
+			_ = file.Close()
+			return fmt.Errorf("%s 下载大小超出清单限制", artifact.Component)
+		}
+		if offset == artifact.Size {
+			break
+		}
+		if closeErr != nil && copyErr == nil {
+			copyErr = closeErr
+		}
+		if copyErr == nil {
+			copyErr = io.ErrUnexpectedEOF
+		}
+		if attempt >= componentDownloadAttempts {
+			_ = file.Close()
+			return fmt.Errorf("保存 %s 失败（已接收 %d/%d 字节，尝试 %d 次）: %w", artifact.Component, offset, artifact.Size, attempt, copyErr)
+		}
+		if err := waitForDownloadRetry(ctx, attempt); err != nil {
+			_ = file.Close()
+			return err
+		}
 	}
-	if closeErr != nil {
-		return fmt.Errorf("关闭 %s 下载文件失败: %w", artifact.Component, closeErr)
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("同步 %s 下载文件失败: %w", artifact.Component, err)
 	}
-	if written != artifact.Size {
-		return fmt.Errorf("%s 下载大小不匹配: 期望 %d，实际 %d", artifact.Component, artifact.Size, written)
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("关闭 %s 下载文件失败: %w", artifact.Component, err)
 	}
 	if actual := hex.EncodeToString(hash.Sum(nil)); !strings.EqualFold(actual, artifact.SHA256) {
 		return fmt.Errorf("%s SHA-256 校验失败", artifact.Component)
 	}
 	return nil
+}
+
+func waitForDownloadRetry(ctx context.Context, attempt int) error {
+	delay := time.Duration(attempt) * componentDownloadRetryDelay
+	if delay > 2*time.Second {
+		delay = 2 * time.Second
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func extractArtifact(archivePath, destination, format string) error {

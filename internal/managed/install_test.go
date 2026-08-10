@@ -56,6 +56,51 @@ func TestInstallerIsIdempotentForBinary(t *testing.T) {
 	}
 }
 
+func TestDownloadArtifactResumesInterruptedResponse(t *testing.T) {
+	data := bytes.Repeat([]byte("homestack-component"), 1024)
+	cut := len(data) / 3
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		current := requests.Add(1)
+		if current == 1 {
+			writer.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
+			writer.WriteHeader(http.StatusOK)
+			_, _ = writer.Write(data[:cut])
+			connection, _, err := writer.(http.Hijacker).Hijack()
+			if err != nil {
+				t.Errorf("中断测试连接失败: %v", err)
+				return
+			}
+			_ = connection.Close()
+			return
+		}
+		expectedRange := fmt.Sprintf("bytes=%d-", cut)
+		if request.Header.Get("Range") != expectedRange {
+			t.Errorf("续传 Range 错误: %q", request.Header.Get("Range"))
+			writer.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		writer.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", cut, len(data)-1, len(data)))
+		writer.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)-cut))
+		writer.WriteHeader(http.StatusPartialContent)
+		_, _ = writer.Write(data[cut:])
+	}))
+	defer server.Close()
+
+	target := filepath.Join(t.TempDir(), "component.bin")
+	artifact := Artifact{Component: "jellyfin-ffmpeg", URL: server.URL, Size: int64(len(data)), SHA256: fmt.Sprintf("%x", sha256.Sum256(data))}
+	if err := downloadArtifact(context.Background(), server.Client(), artifact, target); err != nil {
+		t.Fatal(err)
+	}
+	actual, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(actual, data) || requests.Load() != 2 {
+		t.Fatalf("断点续传结果错误: size=%d requests=%d", len(actual), requests.Load())
+	}
+}
+
 func TestInspectInstallationFindsManagedFFmpeg(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "bin", "ffmpeg")
