@@ -18,8 +18,8 @@ import (
 
 func TestComponentSourcesCoverDesktopPlatforms(t *testing.T) {
 	sources := componentSources()
-	if len(sources) != 12 {
-		t.Fatalf("组件清单应包含 12 条平台记录，实际 %d", len(sources))
+	if len(sources) != 18 {
+		t.Fatalf("组件清单应包含 18 条平台记录，实际 %d", len(sources))
 	}
 	seen := make(map[string]managed.Artifact, len(sources))
 	for _, artifact := range sources {
@@ -27,7 +27,7 @@ func TestComponentSourcesCoverDesktopPlatforms(t *testing.T) {
 	}
 	for _, platform := range []string{"darwin", "windows", "linux"} {
 		for _, arch := range []string{"amd64", "arm64"} {
-			for _, component := range []string{"filebrowser", "jellyfin"} {
+			for _, component := range []string{"filebrowser", "jellyfin", "jellyfin-ffmpeg"} {
 				key := component + "/" + platform + "/" + arch
 				if _, ok := seen[key]; !ok {
 					t.Fatalf("组件清单缺少 %s", key)

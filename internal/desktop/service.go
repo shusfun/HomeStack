@@ -40,6 +40,8 @@ type LocalStatus struct {
 	Error      string `json:"error,omitempty"`
 }
 
+const managedContentPreparationTimeout = 60 * time.Minute
+
 func NewService() *Service {
 	return &Service{client: &APIClient{OpenURL: openSystemURL}, updates: newUpdateService()}
 }
@@ -82,7 +84,7 @@ func (s *Service) Login(controlURL, provider string) (SessionStatus, error) {
 	s.managedContentLock.Lock()
 	defer s.managedContentLock.Unlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), managedContentPreparationTimeout)
 	defer cancel()
 	session, err := s.client.Login(ctx, controlURL, provider)
 	if err != nil {
@@ -122,7 +124,7 @@ func (s *Service) Activate(controlURL, code string) (SessionStatus, error) {
 	s.managedContentLock.Lock()
 	defer s.managedContentLock.Unlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), managedContentPreparationTimeout)
 	defer cancel()
 	tailnet, err := tailscale.New()
 	if err != nil {
@@ -178,7 +180,7 @@ func (s *Service) Session() (SessionStatus, error) {
 		return SessionStatus{}, err
 	}
 	if needsRegistration {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		ctx, cancel := context.WithTimeout(context.Background(), managedContentPreparationTimeout)
 		defer cancel()
 		tailnet, err := tailscale.New()
 		if err != nil {

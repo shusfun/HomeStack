@@ -17,8 +17,8 @@ import (
 )
 
 const (
-	ManifestSchema = 1
-	ProfileSchema  = 1
+	ManifestSchema = 2
+	ProfileSchema  = 2
 )
 
 type Artifact struct {
@@ -44,6 +44,7 @@ type Profile struct {
 	FileRoot         string                       `json:"file_root"`
 	FileBrowser      Installation                 `json:"filebrowser"`
 	Jellyfin         Installation                 `json:"jellyfin"`
+	FFmpeg           Installation                 `json:"ffmpeg"`
 	JellyfinPassword string                       `json:"jellyfin_password"`
 	ModuleSecrets    map[string]map[string]string `json:"module_secrets,omitempty"`
 }
@@ -120,7 +121,7 @@ func ValidateManifest(manifest Manifest) error {
 	}
 	seen := make(map[string]struct{}, len(manifest.Artifacts))
 	for _, artifact := range manifest.Artifacts {
-		if !contains([]string{"filebrowser", "jellyfin"}, artifact.Component) || artifact.Version == "" {
+		if !contains([]string{"filebrowser", "jellyfin", "jellyfin-ffmpeg"}, artifact.Component) || artifact.Version == "" {
 			return errors.New("组件清单包含未知组件或空版本")
 		}
 		if !contains([]string{"darwin", "windows", "linux"}, artifact.Platform) || !contains([]string{"amd64", "arm64"}, artifact.Arch) {

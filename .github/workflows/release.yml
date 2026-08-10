@@ -369,8 +369,8 @@ jobs:
             --upx "$UPX_BINARY" \
             --private-key "$UPDATE_PRIVATE_KEY"
           test -s dist/components.json
-          component_asset_count=$(find dist -maxdepth 1 -type f \( -name 'filebrowser_*' -o -name 'jellyfin_*' \) | wc -l)
-          test "$component_asset_count" -eq 11
+          component_asset_count=$(find dist -maxdepth 1 -type f \( -name 'filebrowser_*' -o -name 'jellyfin_*' -o -name 'jellyfin-ffmpeg_*' \) | wc -l)
+          test "$component_asset_count" -eq 17
 
       - name: 创建 GitHub Release
         shell: bash
@@ -401,7 +401,7 @@ jobs:
 
           自动安装与更新直接从本 Release 下载，使用客户端内置或安装时提供的 Ed25519 公钥验证，不经过 HomeStack VPS。仅自动安装器和更新器实际消费的载荷附带 \`.sig\`。
 
-          FileBrowser Quantum 与 Jellyfin 的固定资产镜像在本 Release；macOS FileBrowser 在发布阶段使用与上游打包版本一致的固定 UPX 解压，以兼容系统执行策略。组件清单记录平台、版本、大小和 SHA-256，并使用同一 Ed25519 发布密钥签名。
+          FileBrowser Quantum、Jellyfin 与 Jellyfin FFmpeg 的固定资产镜像在本 Release；macOS FileBrowser 在发布阶段使用与上游打包版本一致的固定 UPX 解压，以兼容系统执行策略。组件清单记录平台、版本、大小和 SHA-256，并使用同一 Ed25519 发布密钥签名。
 
           当前 macOS 仅使用 ad-hoc codesign 且未公证，Windows 未做 Authenticode；Gatekeeper 或 SmartScreen 可能显示来源警告。
           EOF

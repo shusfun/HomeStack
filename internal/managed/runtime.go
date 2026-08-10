@@ -59,9 +59,7 @@ func Start(ctx context.Context, profile *Profile, directories []protocol.SharedD
 		"--logdir", filepath.Join(profile.StateDir, "jellyfin/log"), "--webdir", profile.Jellyfin.WebDir,
 		"--published-server-url", JellyfinURL, "--nonetchange",
 	}
-	if profile.Jellyfin.FFmpeg != "" {
-		mediaArgs = append(mediaArgs, "--ffmpeg", profile.Jellyfin.FFmpeg)
-	}
+	mediaArgs = append(mediaArgs, "--ffmpeg", profile.FFmpeg.Executable)
 	mediaEnv := []string{"ASPNETCORE_URLS=" + JellyfinURL, "DOTNET_CLI_TELEMETRY_OPTOUT=1"}
 	mediaCommand, err := startProcess(ctx, profile.Jellyfin.Executable, mediaArgs, mediaEnv, filepath.Join(profile.StateDir, "jellyfin", "jellyfin.log"))
 	if err != nil {
@@ -87,7 +85,7 @@ func Start(ctx context.Context, profile *Profile, directories []protocol.SharedD
 		profile.ModuleSecrets = make(map[string]map[string]string)
 	}
 	profile.ModuleSecrets["jellyfin"] = map[string]string{"api_key": token}
-	pathEntries := []string{filepath.Dir(profile.FileBrowser.Executable), filepath.Dir(profile.Jellyfin.Executable)}
+	pathEntries := []string{filepath.Dir(profile.FileBrowser.Executable), filepath.Dir(profile.Jellyfin.Executable), filepath.Dir(profile.FFmpeg.Executable)}
 	if current := os.Getenv("PATH"); current != "" {
 		pathEntries = append(pathEntries, current)
 	}

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -52,6 +53,28 @@ func TestInstallerIsIdempotentForBinary(t *testing.T) {
 	}
 	if info, err := os.Stat(first.Executable); err != nil || info.Mode().Perm() != 0o700 {
 		t.Fatalf("组件可执行权限错误: %v %v", info, err)
+	}
+}
+
+func TestInspectInstallationFindsManagedFFmpeg(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "bin", "ffmpeg")
+	if runtime.GOOS == "windows" {
+		path += ".exe"
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("ffmpeg"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	artifact := Artifact{Component: "jellyfin-ffmpeg", Version: FFmpegVersion, SHA256: strings.Repeat("a", 64)}
+	installed, err := inspectInstallation(root, artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if installed.Executable != path {
+		t.Fatalf("未定位托管 FFmpeg: %s", installed.Executable)
 	}
 }
 

@@ -55,7 +55,7 @@ export function DesktopApp() {
   }
 
   if (session === null && error) return <section className="login-panel"><BrandMark className="login-mark" /><h1>文件与影视准备失败</h1><Feedback error={error} /><button className="primary-button" onClick={() => void refresh()}><RefreshCw size={16} />重试</button></section>;
-  if (session === null) return <CenteredLoader label="正在读取登录状态" />;
+  if (session === null) return <CenteredLoader label="正在准备文件与影视" />;
   return <div className="desktop-shell">
     <DesktopChrome onRefresh={refresh} loggedIn={session.logged_in} onLogout={logout} updateAvailable={updateAvailable} />
     <main className="desktop-content">

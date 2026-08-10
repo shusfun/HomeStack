@@ -326,6 +326,9 @@ func inspectInstallation(root string, artifact Artifact) (Installation, error) {
 			if artifact.Component == "jellyfin" && (name == "jellyfin" || name == "jellyfin.exe") {
 				installed.Executable = path
 			}
+			if artifact.Component == "jellyfin-ffmpeg" && (name == "ffmpeg" || name == "ffmpeg.exe") {
+				installed.Executable = path
+			}
 			if name == "ffmpeg" || name == "ffmpeg.exe" {
 				installed.FFmpeg = path
 			}

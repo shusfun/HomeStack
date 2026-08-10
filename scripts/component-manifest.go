@@ -193,6 +193,7 @@ func releaseAssetURL(repository, tag, filename string) string {
 func componentSources() []managed.Artifact {
 	const fileVersion = "0.3.5"
 	const mediaVersion = "10.11.11"
+	const ffmpegVersion = "7.1.4-3"
 	return []managed.Artifact{
 		{Component: "filebrowser", Version: fileVersion, Platform: "darwin", Arch: "amd64", URL: "https://github.com/gtsteffaniak/filebrowser/releases/download/v0.3.5/darwin-amd64-filebrowser", Filename: "filebrowser", Format: "binary"},
 		{Component: "filebrowser", Version: fileVersion, Platform: "darwin", Arch: "arm64", URL: "https://github.com/gtsteffaniak/filebrowser/releases/download/v0.3.5/darwin-arm64-filebrowser", Filename: "filebrowser", Format: "binary"},
@@ -206,6 +207,12 @@ func componentSources() []managed.Artifact {
 		{Component: "jellyfin", Version: mediaVersion, Platform: "windows", Arch: "arm64", URL: "https://repo.jellyfin.org/files/server/windows/stable/v10.11.11/arm64/jellyfin_10.11.11-arm64.zip", Filename: "jellyfin.zip", Format: "zip"},
 		{Component: "jellyfin", Version: mediaVersion, Platform: "linux", Arch: "amd64", URL: "https://repo.jellyfin.org/files/server/linux/stable/v10.11.11/amd64/jellyfin_10.11.11-amd64.tar.gz", Filename: "jellyfin.tar.gz", Format: "tar.gz"},
 		{Component: "jellyfin", Version: mediaVersion, Platform: "linux", Arch: "arm64", URL: "https://repo.jellyfin.org/files/server/linux/stable/v10.11.11/arm64/jellyfin_10.11.11-arm64.tar.gz", Filename: "jellyfin.tar.gz", Format: "tar.gz"},
+		{Component: "jellyfin-ffmpeg", Version: ffmpegVersion, Platform: "darwin", Arch: "amd64", URL: "https://github.com/jellyfin/jellyfin-ffmpeg/releases/download/v7.1.4-3/jellyfin-ffmpeg_7.1.4-3_portable_mac64-gpl.tar.xz", Filename: "jellyfin-ffmpeg.tar.xz", Format: "tar.xz"},
+		{Component: "jellyfin-ffmpeg", Version: ffmpegVersion, Platform: "darwin", Arch: "arm64", URL: "https://github.com/jellyfin/jellyfin-ffmpeg/releases/download/v7.1.4-3/jellyfin-ffmpeg_7.1.4-3_portable_macarm64-gpl.tar.xz", Filename: "jellyfin-ffmpeg.tar.xz", Format: "tar.xz"},
+		{Component: "jellyfin-ffmpeg", Version: ffmpegVersion, Platform: "windows", Arch: "amd64", URL: "https://github.com/jellyfin/jellyfin-ffmpeg/releases/download/v7.1.4-3/jellyfin-ffmpeg_7.1.4-3_portable_win64-clang-gpl.zip", Filename: "jellyfin-ffmpeg.zip", Format: "zip"},
+		{Component: "jellyfin-ffmpeg", Version: ffmpegVersion, Platform: "windows", Arch: "arm64", URL: "https://github.com/jellyfin/jellyfin-ffmpeg/releases/download/v7.1.4-3/jellyfin-ffmpeg_7.1.4-3_portable_winarm64-clang-gpl.zip", Filename: "jellyfin-ffmpeg.zip", Format: "zip"},
+		{Component: "jellyfin-ffmpeg", Version: ffmpegVersion, Platform: "linux", Arch: "amd64", URL: "https://github.com/jellyfin/jellyfin-ffmpeg/releases/download/v7.1.4-3/jellyfin-ffmpeg_7.1.4-3_portable_linux64-gpl.tar.xz", Filename: "jellyfin-ffmpeg.tar.xz", Format: "tar.xz"},
+		{Component: "jellyfin-ffmpeg", Version: ffmpegVersion, Platform: "linux", Arch: "arm64", URL: "https://github.com/jellyfin/jellyfin-ffmpeg/releases/download/v7.1.4-3/jellyfin-ffmpeg_7.1.4-3_portable_linuxarm64-gpl.tar.xz", Filename: "jellyfin-ffmpeg.tar.xz", Format: "tar.xz"},
 	}
 }
 
