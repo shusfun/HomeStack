@@ -349,17 +349,20 @@ jobs:
             --print-probe filebrowser/linux/amd64)
           [[ -n "$probe_asset" && "$probe_size" =~ ^[0-9]+$ ]]
           available=0
+          fixed_update_proxy_available=0
           for candidate in "https://ghproxy.net/${probe_asset}" "https://ghfast.top/${probe_asset}" "https://gh-proxy.com/${probe_asset}" "$probe_asset"; do
             probe=$(curl -sS -L --range 0-65535 --connect-timeout 8 --max-time 20 -D - -o /dev/null -w $'\nHOMESTACK_STATUS:%{http_code}\n' "$candidate") || probe=""
             status=$(printf '%s\n' "$probe" | sed -n 's/^HOMESTACK_STATUS://p' | tail -n 1)
             content_range=$(printf '%s\n' "$probe" | tr -d '\r' | awk 'tolower($1)=="content-range:" {value=$0} END {sub(/^[^:]*:[[:space:]]*/, "", value); print value}')
             if [[ "$status" == "206" && "$content_range" == "bytes 0-65535/$probe_size" ]]; then
               available=$((available + 1))
+              [[ "$candidate" != https://gh-proxy.com/* ]] || fixed_update_proxy_available=1
             else
               echo "公开组件下载节点不可用: ${candidate%%/https://*} HTTP ${status:-000} Content-Range ${content_range:-缺失}" >&2
             fi
           done
           [[ "$available" -gt 0 ]] || { echo "所有公开组件下载节点均不可用" >&2; exit 1; }
+          [[ "$fixed_update_proxy_available" -eq 1 ]] || { echo "固定自动更新节点 gh-proxy.com 不可用" >&2; exit 1; }
           go run scripts/component-manifest.go \
             --output dist/components.json \
             --lock scripts/components.lock.json \
@@ -394,7 +397,7 @@ jobs:
 
           桌面端推荐安装包：macOS 使用对应架构的 \`.dmg\`，Windows 使用当前用户范围的 \`_setup.exe\`，Linux 使用 AppImage 或 deb。
 
-          自动安装与更新直接从本 Release 下载，使用客户端内置或安装时提供的 Ed25519 公钥验证，不经过 HomeStack VPS。仅自动安装器和更新器实际消费的载荷附带 \`.sig\`。
+          自动更新通过固定公开加速地址读取本 Release，使用客户端内置或安装时提供的 Ed25519 公钥验证，不经过 HomeStack VPS。仅自动安装器和更新器实际消费的载荷附带 \`.sig\`。
 
           FileBrowser Quantum、Jellyfin 与 Jellyfin FFmpeg 由 App 按签名组件清单从公开候选源下载，清单固定平台、版本、大小和 SHA-256。
 

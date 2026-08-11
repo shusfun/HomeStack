@@ -2,7 +2,7 @@
 
 Release 由 GitHub Actions 在六个平台/架构构建，运行 Go、Vitest、typecheck、前端构建和清单契约测试。Control、Agent、桌面安装包和更新包均由固定 Ed25519 发布密钥签名。
 
-安装器只接受 GitHub Release 资产，并验证：
+自动更新通过固定公开加速地址读取 GitHub Release，且只接受 HomeStack Release 资产，并验证：
 
 - 标签、二进制版本、操作系统和架构一致
 - 归档结构符合固定清单

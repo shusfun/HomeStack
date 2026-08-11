@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/wangshangbin/homestack/internal/buildinfo"
+	"github.com/wangshangbin/homestack/internal/releaseproxy"
 )
 
 type AgentUpdateStatus struct {
@@ -106,8 +107,8 @@ func (w *updateProgressWriter) Write(data []byte) (int, error) {
 
 func NewAgentUpdater(manifestURL, publicKeyEncoded, agentURL string) (*AgentUpdater, error) {
 	parsed, err := url.Parse(manifestURL)
-	if err != nil || parsed.Scheme != "https" || parsed.Hostname() != "github.com" {
-		return nil, errors.New("Agent 更新清单必须使用 github.com 的 HTTPS 地址")
+	if err != nil || !releaseproxy.IsProxyURL(parsed.String()) {
+		return nil, errors.New("Agent 更新清单必须使用固定公开加速地址")
 	}
 	publicKey, err := decodeAgentUpdatePublicKey(publicKeyEncoded)
 	if err != nil {
@@ -135,7 +136,7 @@ func (u *AgentUpdater) Check(ctx context.Context) (AgentUpdateStatus, error) {
 	if err != nil {
 		return u.fail(err)
 	}
-	response, err := (&http.Client{Timeout: 30 * time.Second}).Do(request)
+	response, err := releaseproxy.NewClient(30 * time.Second).Do(request)
 	if err != nil {
 		return u.fail(fmt.Errorf("下载 Agent 更新清单失败: %w", err))
 	}
@@ -290,7 +291,7 @@ func (u *AgentUpdater) downloadArtifact(ctx context.Context, artifact updateArti
 	if err != nil {
 		return err
 	}
-	response, err := (&http.Client{Timeout: 20 * time.Minute}).Do(request)
+	response, err := releaseproxy.NewClient(20 * time.Minute).Do(request)
 	if err != nil {
 		return fmt.Errorf("下载 Agent 更新失败: %w", err)
 	}
@@ -322,9 +323,8 @@ func (u *AgentUpdater) downloadArtifact(ctx context.Context, artifact updateArti
 }
 
 func validateAgentArtifact(artifact updateArtifact) error {
-	parsed, err := url.Parse(artifact.URL)
-	if err != nil || parsed.Scheme != "https" || parsed.Hostname() != "github.com" {
-		return errors.New("Agent 更新资产必须使用 github.com 的 HTTPS 地址")
+	if !releaseproxy.IsOfficialURL(artifact.URL) {
+		return errors.New("Agent 更新资产必须使用批准的 HomeStack Release 地址")
 	}
 	if artifact.Filename == "" || artifact.Size <= 0 || artifact.Size > 512<<20 || artifact.DigestAlgo != "sha256" || artifact.SignatureAlgo != "ed25519" || artifact.Digest == "" || artifact.Signature == "" {
 		return errors.New("Agent 更新资产的文件名、大小、摘要或签名字段无效")

@@ -3,6 +3,8 @@ package buildinfo
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/wangshangbin/homestack/internal/releaseproxy"
 )
 
 func TestRequested(t *testing.T) {
@@ -37,5 +39,13 @@ func TestString(t *testing.T) {
 	Version, Commit, Date = "1.2.3", "abc123", "2026-08-06T00:00:00Z"
 	if got := String("homestack-agent"); got != "homestack-agent 1.2.3 (commit abc123, built 2026-08-06T00:00:00Z)" {
 		t.Fatalf("版本输出不符合契约: %s", got)
+	}
+}
+
+func TestReleaseManifestsUseFixedProxy(t *testing.T) {
+	for _, endpoint := range []string{UpdateManifestURL, AgentUpdateManifestURL, ComponentManifestURL} {
+		if !releaseproxy.IsProxyURL(endpoint) {
+			t.Fatalf("发布清单未使用固定代理: %s", endpoint)
+		}
 	}
 }

@@ -20,6 +20,7 @@ import (
 	"github.com/wailsapp/wails/v3/pkg/updater"
 	"github.com/wailsapp/wails/v3/pkg/updater/providers/endpoint"
 	"github.com/wangshangbin/homestack/internal/buildinfo"
+	"github.com/wangshangbin/homestack/internal/releaseproxy"
 )
 
 type UpdateStatus struct {
@@ -56,14 +57,14 @@ func newUpdateService() *UpdateService {
 
 func (s *UpdateService) Configure(app *application.App) error {
 	manifest, err := url.Parse(buildinfo.UpdateManifestURL)
-	if err != nil || manifest.Scheme != "https" || manifest.Hostname() != "github.com" {
-		return errors.New("更新清单必须使用 github.com 的 HTTPS 地址")
+	if err != nil || !releaseproxy.IsProxyURL(manifest.String()) {
+		return errors.New("更新清单必须使用固定公开加速地址")
 	}
 	publicKey, err := decodeUpdatePublicKey(buildinfo.UpdatePublicKey)
 	if err != nil {
 		return err
 	}
-	provider, err := endpoint.New(endpoint.Config{URL: buildinfo.UpdateManifestURL})
+	provider, err := endpoint.New(endpoint.Config{URL: buildinfo.UpdateManifestURL, HTTPClient: releaseproxy.NewClient(20 * time.Minute)})
 	if err != nil {
 		return fmt.Errorf("创建 Wails Endpoint Provider 失败: %w", err)
 	}
@@ -102,6 +103,10 @@ func (p signedProvider) Check(ctx context.Context, request updater.CheckRequest)
 	}
 	if release.Artifact.Platform != request.Platform || release.Artifact.Arch != request.Arch || release.Artifact.Filename == "" || release.Artifact.Size <= 0 {
 		return nil, errors.New("更新资产的平台、架构、文件名或大小无效")
+	}
+	artifactURL, ok := release.Metadata["endpoint.artifact.url"].(string)
+	if !ok || !releaseproxy.IsOfficialURL(artifactURL) {
+		return nil, errors.New("更新资产不是批准的 HomeStack Release 地址")
 	}
 	return release, nil
 }
