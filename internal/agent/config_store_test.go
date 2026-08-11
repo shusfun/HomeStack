@@ -70,6 +70,51 @@ func TestValidateDeviceConfigRejectsInsecureEndpoints(t *testing.T) {
 	}
 }
 
+func TestValidateDeviceConfigForPlatformAcceptsCanonicalWindowsPaths(t *testing.T) {
+	now := time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
+	config := validConfig(now, 1)
+	config.SharedDirectories = []protocol.SharedDirectory{
+		{ID: "downloads", Name: "下载", Path: `C:\Users\test\Downloads`},
+		{ID: "media", Name: "媒体", Path: `\\nas\media`},
+	}
+	config.Modules = append(config.Modules, protocol.ModuleConfig{
+		ID: "cc-connect", InstanceID: "cc-main", Enabled: true, WorkDir: `C:\Users\test\.cc-connect`,
+	})
+	if err := ValidateDeviceConfigForPlatform(config, "windows"); err != nil {
+		t.Fatalf("规范 Windows 路径被拒绝: %v", err)
+	}
+}
+
+func TestValidateDeviceConfigForPlatformRejectsNonCanonicalWindowsPaths(t *testing.T) {
+	now := time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
+	for name, directoryPath := range map[string]string{
+		"盘符相对路径":  `C:Users\test\Downloads`,
+		"正斜杠":     `C:/Users/test/Downloads`,
+		"父目录段":    `C:\Users\test\..\Downloads`,
+		"重复分隔符":   `C:\Users\\test\Downloads`,
+		"不完整 UNC": `\\nas`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			config := validConfig(now, 1)
+			config.SharedDirectories = []protocol.SharedDirectory{{ID: "downloads", Name: "下载", Path: directoryPath}}
+			if err := ValidateDeviceConfigForPlatform(config, "windows"); err == nil {
+				t.Fatal("非规范 Windows 共享目录未被拒绝")
+			}
+		})
+	}
+}
+
+func TestValidateDeviceConfigForPlatformRejectsNonCanonicalWindowsWorkDir(t *testing.T) {
+	now := time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
+	config := validConfig(now, 1)
+	config.Modules = append(config.Modules, protocol.ModuleConfig{
+		ID: "cc-connect", InstanceID: "cc-main", Enabled: true, WorkDir: `C:/Users/test/.cc-connect`,
+	})
+	if err := ValidateDeviceConfigForPlatform(config, "windows"); err == nil {
+		t.Fatal("非规范 Windows work_dir 未被拒绝")
+	}
+}
+
 func validConfig(now time.Time, revision uint64) protocol.SignedDeviceConfig {
 	return protocol.SignedDeviceConfig{
 		DeviceID:   "device-1",

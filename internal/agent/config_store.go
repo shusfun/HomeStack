@@ -8,9 +8,12 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -119,6 +122,10 @@ func (s *ConfigStore) verifyToken(signed string, allowExpired bool) (protocol.Si
 }
 
 func ValidateDeviceConfig(config protocol.SignedDeviceConfig) error {
+	return ValidateDeviceConfigForPlatform(config, runtime.GOOS)
+}
+
+func ValidateDeviceConfigForPlatform(config protocol.SignedDeviceConfig, platform string) error {
 	if config.Revision == 0 {
 		return errors.New("设备配置 revision 必须大于零")
 	}
@@ -165,14 +172,14 @@ func ValidateDeviceConfig(config protocol.SignedDeviceConfig) error {
 			if module.BaseURL != "" || module.ReadOnly {
 				return errors.New("cc-connect 不允许设置 base_url 或只读标记")
 			}
-			if !filepath.IsAbs(module.WorkDir) {
-				return errors.New("cc-connect work_dir 必须是绝对路径")
+			if !IsCanonicalAbsolutePath(platform, module.WorkDir) {
+				return errors.New("cc-connect work_dir 必须是规范化绝对路径")
 			}
 		}
 	}
 	seenDirectories := map[string]struct{}{}
 	for _, directory := range config.SharedDirectories {
-		if directory.ID == "" || directory.Name == "" || !filepath.IsAbs(directory.Path) || filepath.Clean(directory.Path) != directory.Path {
+		if directory.ID == "" || directory.Name == "" || !IsCanonicalAbsolutePath(platform, directory.Path) {
 			return errors.New("共享目录必须包含 ID、名称和规范化绝对路径")
 		}
 		if _, exists := seenDirectories[directory.ID]; exists {
@@ -181,6 +188,52 @@ func ValidateDeviceConfig(config protocol.SignedDeviceConfig) error {
 		seenDirectories[directory.ID] = struct{}{}
 	}
 	return nil
+}
+
+func IsCanonicalAbsolutePath(platform, value string) bool {
+	switch platform {
+	case "darwin", "linux":
+		return path.IsAbs(value) && path.Clean(value) == value
+	case "windows":
+		return isCanonicalWindowsAbsolutePath(value)
+	default:
+		return false
+	}
+}
+
+func isCanonicalWindowsAbsolutePath(value string) bool {
+	if value == "" || strings.ContainsAny(value, "/\x00") {
+		return false
+	}
+	if len(value) >= 3 && isASCIILetter(value[0]) && value[1] == ':' && value[2] == '\\' {
+		return len(value) == 3 || hasCanonicalWindowsComponents(value[3:])
+	}
+	if !strings.HasPrefix(value, `\\`) {
+		return false
+	}
+	components := strings.Split(value[2:], `\`)
+	if len(components) < 2 {
+		return false
+	}
+	for _, component := range components {
+		if component == "" || component == "." || component == ".." || strings.ContainsRune(component, ':') {
+			return false
+		}
+	}
+	return true
+}
+
+func hasCanonicalWindowsComponents(value string) bool {
+	for _, component := range strings.Split(value, `\`) {
+		if component == "" || component == "." || component == ".." || strings.ContainsRune(component, ':') {
+			return false
+		}
+	}
+	return true
+}
+
+func isASCIILetter(value byte) bool {
+	return value >= 'A' && value <= 'Z' || value >= 'a' && value <= 'z'
 }
 
 func ModuleKey(module protocol.ModuleConfig) string {
