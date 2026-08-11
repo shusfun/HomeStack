@@ -1,20 +1,36 @@
 import type { APIErrorResponse, Surface } from "./types";
 
 export async function detectSurface(): Promise<Surface> {
-  const hosted = await probeSurface("/api/meta");
+  if (isNativeWailsBridge()) return "desktop";
+  const failures: string[] = [];
+  const hosted = await probeSurface("/api/meta", failures);
   if (hosted === "control" || hosted === "agent") return hosted;
-  const setup = await probeSurface("/api/setup/status");
+  const setup = await probeSurface("/api/setup/status", failures);
   if (setup === "setup") return "setup";
-  return "desktop";
+  throw new Error(`无法识别 HomeStack 服务：${failures.join("；")}`);
 }
 
-async function probeSurface(path: string): Promise<Surface | null> {
+export function isNativeWailsBridge(): boolean {
+  const browserWindow = globalThis as typeof globalThis & {
+    wails?: { invoke?: unknown; invokeAsync?: unknown };
+    _wails?: { environment?: { OS?: unknown } };
+  };
+  return typeof browserWindow.wails?.invoke === "function"
+    || typeof browserWindow.wails?.invokeAsync === "function"
+    || typeof browserWindow._wails?.environment?.OS === "string";
+}
+
+async function probeSurface(path: string, failures: string[]): Promise<Surface | null> {
   try {
     const response = await fetch(path, { credentials: "same-origin" });
-    if (!response.ok || !response.headers.get("content-type")?.includes("application/json")) return null;
+    if (!response.ok) { failures.push(`${path} 返回 HTTP ${response.status}`); return null; }
+    if (!response.headers.get("content-type")?.includes("application/json")) { failures.push(`${path} 返回了非 JSON 内容`); return null; }
     const surface = ((await response.json()) as { surface?: string }).surface;
-    return surface === "setup" || surface === "control" || surface === "agent" || surface === "desktop" ? surface : null;
-  } catch {
+    if (surface === "setup" || surface === "control" || surface === "agent" || surface === "desktop") return surface;
+    failures.push(`${path} 缺少有效 surface`);
+    return null;
+  } catch (reason) {
+    failures.push(`${path} 请求失败：${reason instanceof Error ? reason.message : String(reason)}`);
     return null;
   }
 }
@@ -31,12 +47,15 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     let message = `HTTP ${response.status}`;
-    try {
-      const payload = (await response.json()) as APIErrorResponse;
-      if (payload.error?.message) message = payload.error.message;
-    } catch {
-      const text = await response.text();
-      if (text.trim()) message = text.trim();
+    const text = await response.text();
+    if (text.trim()) {
+      message = text.trim();
+      try {
+        const payload = JSON.parse(text) as APIErrorResponse;
+        if (payload.error?.message) message = payload.error.message;
+      } catch {
+        // 非 JSON 错误响应直接保留服务端原文。
+      }
     }
     throw new Error(message);
   }

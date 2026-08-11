@@ -73,6 +73,13 @@ func TestLoadDeviceProfileRejectsInvalidManagedContent(t *testing.T) {
 	if _, err := LoadDeviceProfile(); err == nil || !strings.Contains(err.Error(), "解析托管内容档案失败") {
 		t.Fatalf("损坏的托管内容档案未返回真实错误: %v", err)
 	}
+	core, err := LoadCoreDeviceProfile()
+	if err != nil {
+		t.Fatalf("托管内容损坏不应影响核心设备档案: %v", err)
+	}
+	if core.DeviceID != profile.DeviceID || core.ManagedContent != nil {
+		t.Fatalf("核心设备档案读取结果错误: %#v", core)
+	}
 }
 
 func testDeviceProfile() DeviceProfile {

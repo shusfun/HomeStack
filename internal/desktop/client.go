@@ -184,11 +184,19 @@ func (c *APIClient) refresh(ctx context.Context, session securestore.AppSession)
 }
 
 func (c *APIClient) RegisterCurrentNode(ctx context.Context, status tailscale.Status, content *managed.Profile) (securestore.DeviceProfile, error) {
+	return c.registerCurrentNode(ctx, status, content, true)
+}
+
+func (c *APIClient) RegisterCurrentNodeCore(ctx context.Context, status tailscale.Status) (securestore.DeviceProfile, error) {
+	return c.registerCurrentNode(ctx, status, nil, false)
+}
+
+func (c *APIClient) registerCurrentNode(ctx context.Context, status tailscale.Status, content *managed.Profile, includeManagedConfiguration bool) (securestore.DeviceProfile, error) {
 	session, err := securestore.LoadAppSession()
 	if err != nil {
 		return securestore.DeviceProfile{}, err
 	}
-	metadata, request, encryptionKey, err := c.registrationRequest(ctx, session.ControlURL, status)
+	metadata, request, encryptionKey, err := c.registrationRequest(ctx, session.ControlURL, status, includeManagedConfiguration)
 	if err != nil {
 		return securestore.DeviceProfile{}, err
 	}
@@ -204,7 +212,7 @@ func (c *APIClient) ActivateCurrentNode(ctx context.Context, controlURL, code st
 	if err != nil {
 		return securestore.DeviceProfile{}, err
 	}
-	metadata, request, encryptionKey, err := c.registrationRequest(ctx, controlURL, status)
+	metadata, request, encryptionKey, err := c.registrationRequest(ctx, controlURL, status, false)
 	if err != nil {
 		return securestore.DeviceProfile{}, err
 	}
@@ -232,7 +240,7 @@ type registrationMetadata struct {
 	SigningPublicKey string `json:"signing_public_key"`
 }
 
-func (c *APIClient) registrationRequest(ctx context.Context, controlURL string, status tailscale.Status) (registrationMetadata, protocol.NodeRegistration, *ecdh.PrivateKey, error) {
+func (c *APIClient) registrationRequest(ctx context.Context, controlURL string, status tailscale.Status, includeManagedConfiguration bool) (registrationMetadata, protocol.NodeRegistration, *ecdh.PrivateKey, error) {
 	var metadata registrationMetadata
 	if err := c.requestJSON(ctx, http.MethodGet, controlURL+"/api/meta", "", nil, &metadata, http.StatusOK); err != nil {
 		return metadata, protocol.NodeRegistration{}, nil, err
@@ -249,9 +257,13 @@ func (c *APIClient) registrationRequest(ctx context.Context, controlURL string, 
 	if err != nil || strings.TrimSpace(name) == "" {
 		return metadata, protocol.NodeRegistration{}, nil, errors.New("读取设备名称失败")
 	}
-	directories, modules, err := DiscoverDefaultContent()
-	if err != nil {
-		return metadata, protocol.NodeRegistration{}, nil, err
+	var directories []protocol.SharedDirectory
+	var modules []protocol.ModuleConfig
+	if includeManagedConfiguration {
+		directories, modules, err = DiscoverDefaultContent()
+		if err != nil {
+			return metadata, protocol.NodeRegistration{}, nil, err
+		}
 	}
 	request := protocol.NodeRegistration{Name: name, Platform: runtime.GOOS, Architecture: runtime.GOARCH, TailscaleIP: status.TailscaleIP, MagicDNS: status.MagicDNS, DevicePublicKey: base64.RawURLEncoding.EncodeToString(identityKey.Public().(ed25519.PublicKey)), EncryptionPublicKey: base64.RawURLEncoding.EncodeToString(encryptionKey.PublicKey().Bytes()), Modules: modules, SharedDirectories: directories}
 	return metadata, request, encryptionKey, nil

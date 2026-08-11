@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"slices"
@@ -24,10 +25,13 @@ import (
 type Service struct {
 	client             *APIClient
 	updates            *UpdateService
+	identityLock       sync.Mutex
 	managedContentLock sync.Mutex
 	managedStatusMu    sync.RWMutex
 	managedStatus      ManagedContentStatus
 	managedCancel      context.CancelFunc
+	managedDone        chan struct{}
+	managedRunner      func(context.Context) error
 }
 
 type SessionStatus struct {
@@ -84,8 +88,8 @@ func (s *Service) Providers(controlURL string) ([]Provider, error) {
 }
 
 func (s *Service) Login(controlURL, provider string) (SessionStatus, error) {
-	s.managedContentLock.Lock()
-	defer s.managedContentLock.Unlock()
+	s.identityLock.Lock()
+	defer s.identityLock.Unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), managedContentPreparationTimeout)
 	defer cancel()
@@ -103,19 +107,18 @@ func (s *Service) Login(controlURL, provider string) (SessionStatus, error) {
 		_ = securestore.DeleteAppSession()
 		return SessionStatus{}, err
 	}
-	if _, err := s.client.RegisterCurrentNode(ctx, status, nil); err != nil {
+	if _, err := s.client.RegisterCurrentNodeCore(ctx, status); err != nil {
 		_ = securestore.DeleteAppSession()
 		return SessionStatus{}, err
 	}
-	if _, err := s.prepareAndStartManagedContent(ctx, nil); err != nil {
-		return SessionStatus{}, err
-	}
-	return SessionStatus{LoggedIn: true, ControlURL: session.ControlURL, ExpiresAt: session.AccessExpiresAt}, nil
+	result := sessionStatus(session)
+	s.startManagedContentAfterActivation()
+	return result, nil
 }
 
 func (s *Service) Activate(controlURL, code string) (SessionStatus, error) {
-	s.managedContentLock.Lock()
-	defer s.managedContentLock.Unlock()
+	s.identityLock.Lock()
+	defer s.identityLock.Unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), managedContentPreparationTimeout)
 	defer cancel()
@@ -130,20 +133,16 @@ func (s *Service) Activate(controlURL, code string) (SessionStatus, error) {
 	if _, err := s.client.ActivateCurrentNode(ctx, controlURL, code, status, nil); err != nil {
 		return SessionStatus{}, err
 	}
-	if _, err := s.prepareAndStartManagedContent(ctx, nil); err != nil {
-		return SessionStatus{}, err
-	}
 	session, err := securestore.LoadAppSession()
 	if err != nil {
 		return SessionStatus{}, err
 	}
-	return SessionStatus{LoggedIn: true, ControlURL: session.ControlURL, ExpiresAt: session.AccessExpiresAt}, nil
+	result := sessionStatus(session)
+	s.startManagedContentAfterActivation()
+	return result, nil
 }
 
 func (s *Service) Session() (SessionStatus, error) {
-	s.managedContentLock.Lock()
-	defer s.managedContentLock.Unlock()
-
 	hasSession, err := securestore.HasAppSession()
 	if err != nil {
 		return SessionStatus{}, err
@@ -155,59 +154,21 @@ func (s *Service) Session() (SessionStatus, error) {
 	if err != nil {
 		return SessionStatus{}, err
 	}
-	profile, err := securestore.LoadDeviceProfile()
-	if err != nil {
+	if _, err := securestore.LoadCoreDeviceProfile(); err != nil {
 		return SessionStatus{}, err
 	}
-	needsRegistration, err := contentRegistrationRequired(profile)
-	if err != nil {
-		return SessionStatus{}, err
+	return sessionStatus(session), nil
+}
+
+func sessionStatus(session securestore.AppSession) SessionStatus {
+	return SessionStatus{LoggedIn: true, ControlURL: session.ControlURL, ExpiresAt: session.AccessExpiresAt}
+}
+
+func (s *Service) startManagedContentAfterActivation() {
+	if _, err := s.startManagedContentPreparation(true); err != nil {
+		s.finishManagedPreparation("error", "error", err.Error())
+		log.Printf("启动托管组件准备失败: %v", err)
 	}
-	var existing *managed.Profile
-	if profile.ManagedContent != nil && managed.ValidateProfile(*profile.ManagedContent) == nil {
-		existing = profile.ManagedContent
-	}
-	if needsRegistration {
-		ctx, cancel := context.WithTimeout(context.Background(), managedContentPreparationTimeout)
-		defer cancel()
-		tailnet, err := tailscale.New()
-		if err != nil {
-			return SessionStatus{}, err
-		}
-		status, err := tailnet.Status(ctx)
-		if err != nil {
-			return SessionStatus{}, err
-		}
-		if _, err := s.client.RegisterCurrentNode(ctx, status, existing); err != nil {
-			return SessionStatus{}, err
-		}
-	}
-	if existing == nil {
-		ctx, cancel := context.WithTimeout(context.Background(), managedContentPreparationTimeout)
-		defer cancel()
-		content, err := s.prepareAndStartManagedContent(ctx, nil)
-		if err != nil {
-			return SessionStatus{}, err
-		}
-		existing = &content
-	} else if s.ManagedContentStatus().State == "idle" {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		s.beginManagedHealthCheck(*existing, cancel)
-		if err := RepairNodeAutostart(); err != nil {
-			cancel()
-			s.finishManagedPreparation("error", "error", err.Error())
-			return SessionStatus{}, err
-		}
-		if err := waitNodeHealth(ctx); err != nil {
-			cancel()
-			s.finishManagedPreparation("error", "error", err.Error())
-			return SessionStatus{}, err
-		}
-		cancel()
-		s.setManagedReadyFromProfile(*existing)
-		s.finishManagedPreparation("ready", "ready", "")
-	}
-	return SessionStatus{LoggedIn: true, ControlURL: session.ControlURL, ExpiresAt: session.AccessExpiresAt}, nil
 }
 
 func contentRegistrationRequired(profile securestore.DeviceProfile) (bool, error) {
@@ -240,74 +201,163 @@ func prepareManagedContent(ctx context.Context, existing *managed.Profile, repor
 
 func (s *Service) prepareAndStartManagedContent(parent context.Context, existing *managed.Profile) (managed.Profile, error) {
 	ctx, cancel := context.WithCancel(parent)
-	s.beginManagedPreparation(cancel)
 	defer cancel()
 	content, err := prepareManagedContent(ctx, existing, s.reportManagedProgress)
 	if err != nil {
-		s.finishManagedPreparation("error", "error", err.Error())
 		return managed.Profile{}, err
 	}
 	s.setManagedStage("saving")
 	profile, err := securestore.LoadDeviceProfile()
 	if err != nil {
-		s.finishManagedPreparation("error", "error", err.Error())
 		return managed.Profile{}, err
 	}
 	profile.ManagedContent = &content
 	if err := securestore.SaveDeviceProfile(profile); err != nil {
-		s.finishManagedPreparation("error", "error", err.Error())
 		return managed.Profile{}, err
 	}
 	s.setManagedStage("configuring")
 	if err := ConfigureNodeAutostart(); err != nil {
-		s.finishManagedPreparation("error", "error", err.Error())
 		return managed.Profile{}, err
 	}
 	s.setManagedStage("starting")
 	if err := RestartNode(); err != nil {
-		s.finishManagedPreparation("error", "error", err.Error())
 		return managed.Profile{}, err
 	}
 	s.setManagedStage("health")
 	healthContext, healthCancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer healthCancel()
 	if err := waitNodeHealth(healthContext); err != nil {
-		s.finishManagedPreparation("error", "error", err.Error())
 		return managed.Profile{}, err
 	}
 	s.setManagedReadyFromProfile(content)
-	s.finishManagedPreparation("ready", "ready", "")
 	return content, nil
 }
 
-func (s *Service) ResumeManagedContentPreparation() (SessionStatus, error) {
+func (s *Service) EnsureManagedContentPreparation() (ManagedContentStatus, error) {
+	return s.startManagedContentPreparation(false)
+}
+
+func (s *Service) startManagedContentPreparation(force bool) (ManagedContentStatus, error) {
+	hasSession, err := securestore.HasAppSession()
+	if err != nil {
+		return s.ManagedContentStatus(), err
+	}
+	if !hasSession {
+		return s.ManagedContentStatus(), errors.New("尚未完成登录，不能继续准备组件")
+	}
+	if _, err := securestore.LoadCoreDeviceProfile(); err != nil {
+		return s.ManagedContentStatus(), err
+	}
+	s.managedStatusMu.Lock()
+	current := cloneManagedStatus(s.managedStatus)
+	if s.managedCancel != nil {
+		s.managedStatusMu.Unlock()
+		if current.State == "preparing" {
+			return current, nil
+		}
+		return current, errors.New("组件准备任务正在停止，请稍后重试")
+	}
+	if !force && current.State != "idle" {
+		s.managedStatusMu.Unlock()
+		return current, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), managedContentPreparationTimeout)
+	status := newManagedContentStatus()
+	status.State, status.Phase = "preparing", "manifest"
+	s.managedStatus = status
+	s.managedCancel = cancel
+	done := make(chan struct{})
+	s.managedDone = done
+	current = cloneManagedStatus(status)
+	s.managedStatusMu.Unlock()
+	emitManagedStatus(current)
+	go s.runManagedContentPreparation(ctx, cancel, done)
+	return current, nil
+}
+
+func (s *Service) runManagedContentPreparation(ctx context.Context, cancel context.CancelFunc, done chan struct{}) {
+	defer close(done)
+	defer cancel()
 	s.managedContentLock.Lock()
 	defer s.managedContentLock.Unlock()
-	hasSession, err := securestore.HasAppSession()
-	if err != nil || !hasSession {
-		return SessionStatus{}, errors.New("尚未完成登录，不能继续准备组件")
+	runner := s.managedRunner
+	if runner == nil {
+		runner = s.runManagedContent
 	}
+	if err := runner(ctx); err != nil {
+		s.finishManagedPreparation("error", "error", err.Error())
+		log.Printf("托管组件准备失败: %v", err)
+		return
+	}
+	s.finishManagedPreparation("ready", "ready", "")
+}
+
+func (s *Service) runManagedContent(ctx context.Context) error {
 	profile, err := securestore.LoadDeviceProfile()
 	if err != nil {
-		return SessionStatus{}, err
+		return err
 	}
 	var existing *managed.Profile
 	if profile.ManagedContent != nil && managed.ValidateProfile(*profile.ManagedContent) == nil {
 		existing = profile.ManagedContent
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), managedContentPreparationTimeout)
-	defer cancel()
-	if _, err := s.prepareAndStartManagedContent(ctx, existing); err != nil {
+	needsRegistration, err := contentRegistrationRequired(profile)
+	if err != nil {
+		return err
+	}
+	if needsRegistration {
+		tailnet, err := tailscale.New()
+		if err != nil {
+			return err
+		}
+		status, err := tailnet.Status(ctx)
+		if err != nil {
+			return err
+		}
+		if _, err := s.client.RegisterCurrentNode(ctx, status, existing); err != nil {
+			return err
+		}
+	}
+	if existing == nil {
+		_, err := s.prepareAndStartManagedContent(ctx, nil)
+		return err
+	}
+	healthContext, healthCancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer healthCancel()
+	s.beginManagedHealthCheck(*existing, healthCancel)
+	if err := RepairNodeAutostart(); err != nil {
+		return err
+	}
+	if err := waitNodeHealth(healthContext); err != nil {
+		return err
+	}
+	s.setManagedReadyFromProfile(*existing)
+	return nil
+}
+
+func (s *Service) ResumeManagedContentPreparation() (SessionStatus, error) {
+	if _, err := s.startManagedContentPreparation(true); err != nil {
 		return SessionStatus{}, err
 	}
 	session, err := securestore.LoadAppSession()
 	if err != nil {
 		return SessionStatus{}, err
 	}
-	return SessionStatus{LoggedIn: true, ControlURL: session.ControlURL, ExpiresAt: session.AccessExpiresAt}, nil
+	return sessionStatus(session), nil
 }
 
 func (s *Service) Logout() error {
+	s.identityLock.Lock()
+	defer s.identityLock.Unlock()
+
+	s.managedStatusMu.Lock()
+	cancel := s.managedCancel
+	done := s.managedDone
+	s.managedStatusMu.Unlock()
+	if cancel != nil {
+		cancel()
+		<-done
+	}
 	return securestore.DeleteAppSession()
 }
 

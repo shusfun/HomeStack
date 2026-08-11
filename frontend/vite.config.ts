@@ -12,6 +12,13 @@ export default defineConfig({
   build: {
     outDir: "../internal/web/dist",
     emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        entryFileNames: "assets/app.js",
+        chunkFileNames: "assets/[name]-[hash].js",
+        assetFileNames: (assetInfo) => assetInfo.name?.slice(-4) === ".css" ? "assets/app.css" : "assets/[name]-[hash][extname]",
+      },
+    },
   },
   server: {
     port: vitePort,

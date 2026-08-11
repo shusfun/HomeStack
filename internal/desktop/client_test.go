@@ -5,6 +5,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/wangshangbin/homestack/internal/tailscale"
+	"github.com/zalando/go-keyring"
 )
 
 func TestCallbackHandlerRejectsWrongStateAndAcceptsCode(t *testing.T) {
@@ -69,5 +72,25 @@ func TestWriteRequestIncludesControlOrigin(t *testing.T) {
 	}
 	if !response.OK {
 		t.Fatal("写请求响应未正确解码")
+	}
+}
+
+func TestCoreRegistrationExcludesManagedDirectoriesAndModules(t *testing.T) {
+	keyring.MockInit()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"signing_key_id":"control","signing_public_key":"unused"}`))
+	}))
+	defer server.Close()
+
+	client := &APIClient{HTTPClient: server.Client()}
+	_, request, _, err := client.registrationRequest(context.Background(), server.URL, tailscale.Status{
+		Online: true, TailscaleIP: "100.64.0.1", MagicDNS: "device.tailnet.ts.net",
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(request.SharedDirectories) != 0 || len(request.Modules) != 0 {
+		t.Fatalf("核心登记不应包含托管配置: directories=%+v modules=%+v", request.SharedDirectories, request.Modules)
 	}
 }

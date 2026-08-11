@@ -1,24 +1,25 @@
-import { Check, CircleAlert, LoaderCircle } from "lucide-react";
 import type { ReactNode } from "react";
+import { Badge, EmptyState as SharedEmptyState, InlineNotice, Loading, PageHeader } from "./components/ui";
 
 export function Page({ title, action, children }: { title: string; action?: ReactNode; children: ReactNode }) {
-  return <section className="page"><header className="page-header"><h1>{title}</h1>{action}</header>{children}</section>;
+  return <section className="page"><PageHeader action={action} title={title} />{children}</section>;
 }
 
 export function Feedback({ message, error }: { message?: string; error?: string }) {
-  return <>{message && <div className="feedback success"><Check size={17} />{message}</div>}{error && <div className="feedback error"><CircleAlert size={17} />{error}</div>}</>;
+  return <>{message && <InlineNotice tone="success">{message}</InlineNotice>}{error && <InlineNotice tone="danger">{error}</InlineNotice>}</>;
 }
 
 export function CenteredLoader({ label, compact = false }: { label: string; compact?: boolean }) {
-  return <div className={`centered-loader ${compact ? "compact" : ""}`}><LoaderCircle className="spin" size={22} /><span>{label}</span></div>;
+  return <Loading compact={compact} label={label} />;
 }
 
 export function EmptyState({ icon, label }: { icon: ReactNode; label: string }) {
-  return <div className="empty-state">{icon}<span>{label}</span></div>;
+  return <SharedEmptyState icon={icon} title={label} />;
 }
 
 export function StatusPill({ label, tone }: { label: string; tone: string }) {
-  return <span className={`status-pill ${tone}`}>{label}</span>;
+  const mapped = tone === "good" ? "success" : tone === "warn" ? "warning" : "neutral";
+  return <Badge tone={mapped}>{label}</Badge>;
 }
 
 export function errorMessage(reason: unknown) {

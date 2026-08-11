@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { detectSurface, formatBytes } from "./api";
+import { api, detectSurface, formatBytes } from "./api";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -34,6 +34,26 @@ describe("detectSurface", () => {
     vi.stubGlobal("fetch", fetch);
     await expect(detectSurface()).resolves.toBe("agent");
     expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it("两种浏览器探测都失败时返回真实错误，不降级为 Desktop", async () => {
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({}, 503))
+      .mockRejectedValueOnce(new Error("network down"));
+    vi.stubGlobal("fetch", fetch);
+    await expect(detectSurface()).rejects.toThrow("/api/meta 返回 HTTP 503");
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("api", () => {
+  it("保留服务端返回的纯文本错误", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("共享目录路径无效", {
+      status: 400,
+      headers: { "Content-Type": "text/plain" },
+    })));
+
+    await expect(api("/api/test")).rejects.toThrow("共享目录路径无效");
   });
 });
 

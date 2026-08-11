@@ -163,13 +163,9 @@ func SaveDeviceProfile(profile DeviceProfile) error {
 }
 
 func LoadDeviceProfile() (DeviceProfile, error) {
-	data, err := keyring.Get(serviceName, deviceProfileName)
+	profile, err := loadStoredDeviceProfile()
 	if err != nil {
-		return DeviceProfile{}, fmt.Errorf("读取设备安全档案失败: %w", err)
-	}
-	var profile DeviceProfile
-	if err := json.Unmarshal([]byte(data), &profile); err != nil {
-		return DeviceProfile{}, fmt.Errorf("解析设备安全档案失败: %w", err)
+		return DeviceProfile{}, err
 	}
 	managedData, managedErr := keyring.Get(serviceName, managedContentAccount)
 	if managedErr == nil {
@@ -180,6 +176,27 @@ func LoadDeviceProfile() (DeviceProfile, error) {
 		profile.ManagedContent = &content
 	} else if !errors.Is(managedErr, keyring.ErrNotFound) {
 		return DeviceProfile{}, fmt.Errorf("读取托管内容档案失败: %w", managedErr)
+	}
+	return profile, nil
+}
+
+func LoadCoreDeviceProfile() (DeviceProfile, error) {
+	profile, err := loadStoredDeviceProfile()
+	if err != nil {
+		return DeviceProfile{}, err
+	}
+	profile.ManagedContent = nil
+	return profile, nil
+}
+
+func loadStoredDeviceProfile() (DeviceProfile, error) {
+	data, err := keyring.Get(serviceName, deviceProfileName)
+	if err != nil {
+		return DeviceProfile{}, fmt.Errorf("读取设备安全档案失败: %w", err)
+	}
+	var profile DeviceProfile
+	if err := json.Unmarshal([]byte(data), &profile); err != nil {
+		return DeviceProfile{}, fmt.Errorf("解析设备安全档案失败: %w", err)
 	}
 	if profile.DeviceID == "" || profile.ControlKeyID == "" || profile.ControlPublicKey == "" || profile.SignedConfig == "" || profile.Credential.DeviceToken == "" {
 		return DeviceProfile{}, errors.New("设备安全档案不完整")
