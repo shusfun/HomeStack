@@ -24,15 +24,15 @@ import (
 )
 
 type Status struct {
-	State          string    `json:"state"`
-	CurrentVersion string    `json:"current_version"`
-	LatestVersion  string    `json:"latest_version,omitempty"`
-	PublishedAt    time.Time `json:"published_at,omitempty"`
-	Notes          string    `json:"notes,omitempty"`
-	Downloaded     int64     `json:"downloaded,omitempty"`
-	Total          int64     `json:"total,omitempty"`
-	Signature      string    `json:"signature"`
-	Error          string    `json:"error,omitempty"`
+	State          string     `json:"state"`
+	CurrentVersion string     `json:"current_version"`
+	LatestVersion  string     `json:"latest_version,omitempty"`
+	PublishedAt    *time.Time `json:"published_at,omitempty"`
+	Notes          string     `json:"notes,omitempty"`
+	Downloaded     int64      `json:"downloaded,omitempty"`
+	Total          int64      `json:"total,omitempty"`
+	Signature      string     `json:"signature"`
+	Error          string     `json:"error,omitempty"`
 }
 
 type artifact struct {
@@ -146,6 +146,10 @@ func (u *Updater) Check(ctx context.Context) (Status, error) {
 	if value.SchemaVersion != 1 {
 		return u.fail(fmt.Errorf("Control 更新清单 schemaVersion 必须为 1，实际为 %d", value.SchemaVersion))
 	}
+	publishedAt, err := time.Parse(time.RFC3339, value.PublishedAt)
+	if err != nil {
+		return u.fail(fmt.Errorf("Control 更新发布时间无效: %w", err))
+	}
 	newer, err := semverNewer(value.Version, u.status.CurrentVersion)
 	if err != nil {
 		return u.fail(err)
@@ -153,7 +157,8 @@ func (u *Updater) Check(ctx context.Context) (Status, error) {
 	if !newer {
 		u.mu.Lock()
 		u.pending, u.archivePath = nil, ""
-		u.status.State, u.status.LatestVersion, u.status.Error = "up-to-date", strings.TrimPrefix(value.Version, "v"), ""
+		u.status.State, u.status.LatestVersion, u.status.PublishedAt = "up-to-date", strings.TrimPrefix(value.Version, "v"), &publishedAt
+		u.status.Notes, u.status.Error = value.Notes, ""
 		status := u.status
 		u.mu.Unlock()
 		return status, nil
@@ -175,15 +180,11 @@ func (u *Updater) Check(ctx context.Context) (Status, error) {
 	if err := validateArtifact(*selected, version, u.architecture); err != nil {
 		return u.fail(err)
 	}
-	publishedAt, err := time.Parse(time.RFC3339, value.PublishedAt)
-	if err != nil {
-		return u.fail(fmt.Errorf("Control 更新发布时间无效: %w", err))
-	}
 	u.mu.Lock()
 	copy := *selected
 	u.pending = &copy
 	u.archivePath = ""
-	u.status.State, u.status.LatestVersion, u.status.PublishedAt = "available", version, publishedAt
+	u.status.State, u.status.LatestVersion, u.status.PublishedAt = "available", version, &publishedAt
 	u.status.Notes, u.status.Downloaded, u.status.Total = value.Notes, 0, selected.Size
 	u.status.Signature, u.status.Error = "签名已声明，等待下载校验", ""
 	status := u.status

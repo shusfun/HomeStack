@@ -6,7 +6,7 @@ info:
   productIdentifier: "dev.homestack.desktop"
   description: "多端 NAS 与远程开发整合器"
   copyright: "Copyright 2026 HomeStack"
-  version: "0.2.22"
+  version: "0.2.23"
 
 dev_mode:
   root_path: .

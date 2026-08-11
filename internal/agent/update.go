@@ -28,15 +28,15 @@ import (
 )
 
 type AgentUpdateStatus struct {
-	State          string    `json:"state"`
-	CurrentVersion string    `json:"current_version"`
-	LatestVersion  string    `json:"latest_version,omitempty"`
-	PublishedAt    time.Time `json:"published_at,omitempty"`
-	Notes          string    `json:"notes,omitempty"`
-	Downloaded     int64     `json:"downloaded,omitempty"`
-	Total          int64     `json:"total,omitempty"`
-	Signature      string    `json:"signature"`
-	Error          string    `json:"error,omitempty"`
+	State          string     `json:"state"`
+	CurrentVersion string     `json:"current_version"`
+	LatestVersion  string     `json:"latest_version,omitempty"`
+	PublishedAt    *time.Time `json:"published_at,omitempty"`
+	Notes          string     `json:"notes,omitempty"`
+	Downloaded     int64      `json:"downloaded,omitempty"`
+	Total          int64      `json:"total,omitempty"`
+	Signature      string     `json:"signature"`
+	Error          string     `json:"error,omitempty"`
 }
 
 type updateArtifact struct {
@@ -151,6 +151,10 @@ func (u *AgentUpdater) Check(ctx context.Context) (AgentUpdateStatus, error) {
 	if manifest.SchemaVersion != 1 {
 		return u.fail(fmt.Errorf("Agent 更新清单 schemaVersion 必须为 1，实际为 %d", manifest.SchemaVersion))
 	}
+	publishedAt, err := time.Parse(time.RFC3339, manifest.PublishedAt)
+	if err != nil {
+		return u.fail(fmt.Errorf("Agent 更新发布时间无效: %w", err))
+	}
 	newer, err := semverNewer(manifest.Version, buildinfo.Version)
 	if err != nil {
 		return u.fail(err)
@@ -160,6 +164,8 @@ func (u *AgentUpdater) Check(ctx context.Context) (AgentUpdateStatus, error) {
 		u.pending = nil
 		u.status.State = "up-to-date"
 		u.status.LatestVersion = strings.TrimPrefix(manifest.Version, "v")
+		u.status.PublishedAt = &publishedAt
+		u.status.Notes = manifest.Notes
 		u.status.Downloaded = 0
 		u.status.Total = 0
 		u.status.Error = ""
@@ -183,16 +189,12 @@ func (u *AgentUpdater) Check(ctx context.Context) (AgentUpdateStatus, error) {
 	if err := validateAgentArtifact(*selected); err != nil {
 		return u.fail(err)
 	}
-	publishedAt, err := time.Parse(time.RFC3339, manifest.PublishedAt)
-	if err != nil {
-		return u.fail(fmt.Errorf("Agent 更新发布时间无效: %w", err))
-	}
 	u.mu.Lock()
 	copy := *selected
 	u.pending = &copy
 	u.status.State = "available"
 	u.status.LatestVersion = strings.TrimPrefix(manifest.Version, "v")
-	u.status.PublishedAt = publishedAt
+	u.status.PublishedAt = &publishedAt
 	u.status.Notes = manifest.Notes
 	u.status.Downloaded = 0
 	u.status.Total = selected.Size

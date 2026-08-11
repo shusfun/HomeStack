@@ -105,6 +105,51 @@ func TestUpdaterRejectsTamperedControlAsset(t *testing.T) {
 	}
 }
 
+func TestStatusOmitsUnknownPublicationTime(t *testing.T) {
+	data, err := json.Marshal(Status{State: "idle", CurrentVersion: "1.2.3", Signature: "等待校验"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(data, []byte("published_at")) {
+		t.Fatalf("未知发布时间不应进入 API: %s", data)
+	}
+}
+
+func TestUpdaterReportsReleaseMetadataWhenCurrent(t *testing.T) {
+	publicKey, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publishedAt := time.Date(2026, 8, 11, 11, 31, 13, 0, time.UTC)
+	manifestURL := "https://gh-proxy.com/https://github.com/shusfun/HomeStack/releases/latest/download/latest.json"
+	manifestData, err := json.Marshal(manifest{
+		SchemaVersion: 1,
+		Version:       "1.2.4",
+		PublishedAt:   publishedAt.Format(time.RFC3339),
+		Notes:         "release notes",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(manifestData)), Header: make(http.Header), Request: request}, nil
+	})}
+	updater, err := New(Options{
+		CurrentVersion: "1.2.4", ManifestURL: manifestURL, PublicKey: base64.StdEncoding.EncodeToString(publicKey),
+		StateDir: t.TempDir(), Platform: "linux", Architecture: "amd64", HTTPClient: client, Installer: &testInstaller{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := updater.Check(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.State != "up-to-date" || status.LatestVersion != "1.2.4" || status.PublishedAt == nil || !status.PublishedAt.Equal(publishedAt) || status.Notes != "release notes" {
+		t.Fatalf("当前版本的 Release 元数据不完整: %+v", status)
+	}
+}
+
 func TestValidateArtifactRequiresExactControlUpdateName(t *testing.T) {
 	valid := artifact{
 		URL:      "https://github.com/shusfun/HomeStack/releases/download/v1.2.4/homestack-control-update_1.2.4_linux_arm64.tar.gz",

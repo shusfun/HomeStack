@@ -24,17 +24,17 @@ import (
 )
 
 type UpdateStatus struct {
-	State          string    `json:"state"`
-	CurrentVersion string    `json:"current_version"`
-	LatestVersion  string    `json:"latest_version,omitempty"`
-	PublishedAt    time.Time `json:"published_at,omitempty"`
-	Notes          string    `json:"notes,omitempty"`
-	Downloaded     int64     `json:"downloaded,omitempty"`
-	Total          int64     `json:"total,omitempty"`
-	Signature      string    `json:"signature"`
-	Mode           string    `json:"mode"`
-	Error          string    `json:"error,omitempty"`
-	SkippedVersion string    `json:"skipped_version,omitempty"`
+	State          string     `json:"state"`
+	CurrentVersion string     `json:"current_version"`
+	LatestVersion  string     `json:"latest_version,omitempty"`
+	PublishedAt    *time.Time `json:"published_at,omitempty"`
+	Notes          string     `json:"notes,omitempty"`
+	Downloaded     int64      `json:"downloaded,omitempty"`
+	Total          int64      `json:"total,omitempty"`
+	Signature      string     `json:"signature"`
+	Mode           string     `json:"mode"`
+	Error          string     `json:"error,omitempty"`
+	SkippedVersion string     `json:"skipped_version,omitempty"`
 }
 
 type UpdateService struct {
@@ -135,14 +135,18 @@ func (s *UpdateService) Check() (UpdateStatus, error) {
 	s.mu.Lock()
 	if release == nil {
 		s.status.State = "up-to-date"
+		s.status.LatestVersion = ""
+		s.status.PublishedAt = nil
+		s.status.Notes = ""
 		s.status.Error = ""
 		s.status.Downloaded = 0
 		s.status.Total = 0
 		s.pendingVersion = ""
 	} else {
+		publishedAt := release.PublishedAt
 		s.status.State = "available"
 		s.status.LatestVersion = release.Version
-		s.status.PublishedAt = release.PublishedAt
+		s.status.PublishedAt = &publishedAt
 		s.status.Notes = release.Notes
 		s.status.Downloaded = 0
 		s.status.Total = release.Artifact.Size
