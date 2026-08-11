@@ -3,13 +3,8 @@
 package main
 
 import (
-	"context"
-	"crypto/sha256"
-	"fmt"
-	"net/http"
-	"net/http/httptest"
-	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -17,7 +12,14 @@ import (
 )
 
 func TestComponentSourcesCoverDesktopPlatforms(t *testing.T) {
-	sources := componentSources()
+	_, filename, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("无法定位组件锁定清单测试文件")
+	}
+	sources, err := readComponentLock(filepath.Join(filepath.Dir(filename), "components.lock.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(sources) != 18 {
 		t.Fatalf("组件清单应包含 18 条平台记录，实际 %d", len(sources))
 	}
@@ -43,40 +45,37 @@ func TestComponentSourcesCoverDesktopPlatforms(t *testing.T) {
 			t.Fatalf("FileBrowser 来源未固定到官方稳定版本: key=%s version=%s url=%s", key, artifact.Version, artifact.URL)
 		}
 	}
-}
-
-func TestDownloadRemoteWritesVerifiedMirror(t *testing.T) {
-	payload := []byte("component")
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
-		_, _ = writer.Write(payload)
-	}))
-	defer server.Close()
-	target := filepath.Join(t.TempDir(), "component.bin")
-	artifact := managed.Artifact{Component: "filebrowser", Platform: "linux", Arch: "amd64", URL: server.URL}
-	size, digest, err := downloadRemote(context.Background(), server.Client(), artifact, target)
-	if err != nil {
-		t.Fatal(err)
+	for index := range sources {
+		sources[index].URLs = candidateURLs(sources[index].URL)
 	}
-	expected := fmt.Sprintf("%x", sha256.Sum256(payload))
-	if size != int64(len(payload)) || digest != expected {
-		t.Fatalf("镜像资产元数据错误: size=%d digest=%s", size, digest)
-	}
-	data, err := os.ReadFile(target)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(data) != string(payload) {
-		t.Fatalf("镜像资产内容错误: %q", data)
+	if err := managed.ValidateManifest(managed.Manifest{SchemaVersion: managed.ManifestSchema, Artifacts: sources}); err != nil {
+		t.Fatalf("锁定清单生成的组件清单无效: %v", err)
 	}
 }
 
-func TestMirrorReleaseURL(t *testing.T) {
-	artifact := managed.Artifact{Component: "jellyfin", Version: "10.11.11", Platform: "darwin", Arch: "amd64", Format: "tar.xz"}
-	filename := mirrorFilename(artifact)
-	if filename != "jellyfin_10.11.11_darwin_amd64.tar.xz" {
-		t.Fatalf("镜像文件名错误: %s", filename)
+func TestCandidateURLsUseApprovedPublicAccelerators(t *testing.T) {
+	official := "https://github.com/example/project/releases/download/v1/file.zip"
+	candidates := candidateURLs(official)
+	if len(candidates) != 4 || candidates[3] != official {
+		t.Fatalf("GitHub 候选源不完整: %v", candidates)
 	}
-	if got := releaseAssetURL("shusfun/HomeStack", "v0.2.9", filename); got != "https://github.com/shusfun/HomeStack/releases/download/v0.2.9/jellyfin_10.11.11_darwin_amd64.tar.xz" {
-		t.Fatalf("镜像 URL 错误: %s", got)
+	for _, host := range []string{"ghproxy.net", "ghfast.top", "gh-proxy.com"} {
+		if !strings.Contains(strings.Join(candidates, "\n"), host) {
+			t.Fatalf("候选源缺少 %s", host)
+		}
+	}
+	if got := candidateURLs("https://repo.jellyfin.org/files/server.zip"); len(got) != 1 || got[0] != "https://repo.jellyfin.org/files/server.zip" {
+		t.Fatalf("Jellyfin 应只使用官方源: %v", got)
+	}
+}
+
+func TestComponentProbeReadsLockedMetadata(t *testing.T) {
+	artifacts := []managed.Artifact{{Component: "filebrowser", Platform: "linux", Arch: "amd64", URL: "https://github.com/example/filebrowser", Size: 42}}
+	probeURL, probeSize, err := componentProbe(artifacts, "filebrowser/linux/amd64")
+	if err != nil || probeURL != artifacts[0].URL || probeSize != artifacts[0].Size {
+		t.Fatalf("测速资产元数据错误: url=%s size=%d err=%v", probeURL, probeSize, err)
+	}
+	if _, _, err := componentProbe(artifacts, "filebrowser/linux/arm64"); err == nil {
+		t.Fatal("缺失的测速资产未返回错误")
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/netip"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -238,10 +239,56 @@ func validateNodeRegistration(request protocol.NodeRegistration) error {
 	}
 	seen := map[string]bool{}
 	for _, directory := range request.SharedDirectories {
-		if directory.ID == "" || directory.Name == "" || !filepath.IsAbs(directory.Path) || filepath.Clean(directory.Path) != directory.Path || seen[directory.ID] {
+		if directory.ID == "" || directory.Name == "" || !isCanonicalAbsolutePath(request.Platform, directory.Path) || seen[directory.ID] {
 			return errors.New("共享目录必须使用唯一 ID、名称和规范化绝对路径")
 		}
 		seen[directory.ID] = true
 	}
 	return nil
+}
+
+func isCanonicalAbsolutePath(platform, value string) bool {
+	switch platform {
+	case "darwin", "linux":
+		return path.IsAbs(value) && path.Clean(value) == value
+	case "windows":
+		return isCanonicalWindowsAbsolutePath(value)
+	default:
+		return false
+	}
+}
+
+func isCanonicalWindowsAbsolutePath(value string) bool {
+	if value == "" || strings.ContainsAny(value, "/\x00") {
+		return false
+	}
+	if len(value) >= 3 && isASCIILetter(value[0]) && value[1] == ':' && value[2] == '\\' {
+		return len(value) == 3 || hasCanonicalWindowsComponents(value[3:])
+	}
+	if !strings.HasPrefix(value, `\\`) {
+		return false
+	}
+	components := strings.Split(value[2:], `\`)
+	if len(components) < 2 {
+		return false
+	}
+	for _, component := range components {
+		if component == "" || component == "." || component == ".." || strings.ContainsRune(component, ':') {
+			return false
+		}
+	}
+	return true
+}
+
+func hasCanonicalWindowsComponents(value string) bool {
+	for _, component := range strings.Split(value, `\`) {
+		if component == "" || component == "." || component == ".." || strings.ContainsRune(component, ':') {
+			return false
+		}
+	}
+	return true
+}
+
+func isASCIILetter(value byte) bool {
+	return value >= 'A' && value <= 'Z' || value >= 'a' && value <= 'z'
 }

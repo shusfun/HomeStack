@@ -22,15 +22,16 @@ const (
 )
 
 type Artifact struct {
-	Component string `json:"component"`
-	Version   string `json:"version"`
-	Platform  string `json:"platform"`
-	Arch      string `json:"arch"`
-	URL       string `json:"url"`
-	Filename  string `json:"filename"`
-	Format    string `json:"format"`
-	Size      int64  `json:"size"`
-	SHA256    string `json:"sha256"`
+	Component string   `json:"component"`
+	Version   string   `json:"version"`
+	Platform  string   `json:"platform"`
+	Arch      string   `json:"arch"`
+	URL       string   `json:"url"`
+	URLs      []string `json:"urls,omitempty"`
+	Filename  string   `json:"filename"`
+	Format    string   `json:"format"`
+	Size      int64    `json:"size"`
+	SHA256    string   `json:"sha256"`
 }
 
 type Manifest struct {
@@ -131,9 +132,16 @@ func ValidateManifest(manifest Manifest) error {
 		if !contains([]string{"binary", "zip", "tar.gz", "tar.xz"}, artifact.Format) || artifact.Size < 1 || artifact.Size > 512<<20 || digestErr != nil || len(digest) != sha256.Size {
 			return errors.New("组件清单资产格式、大小或 SHA-256 无效")
 		}
-		parsed, err := url.Parse(artifact.URL)
-		if err != nil || parsed.Scheme != "https" || parsed.User != nil || !contains([]string{"github.com", "repo.jellyfin.org"}, strings.ToLower(parsed.Hostname())) {
-			return errors.New("组件资产必须来自批准的无凭据 HTTPS 主机")
+		if err := validateOfficialURL(artifact.URL); err != nil {
+			return err
+		}
+		if len(artifact.URLs) == 0 {
+			return errors.New("组件资产缺少公开下载候选源")
+		}
+		for _, candidate := range artifact.URLs {
+			if err := validateCandidateURL(candidate, artifact.URL); err != nil {
+				return err
+			}
 		}
 		if artifact.Filename == "" || strings.ContainsAny(artifact.Filename, `/\\`) {
 			return errors.New("组件资产文件名无效")
@@ -143,6 +151,32 @@ func ValidateManifest(manifest Manifest) error {
 			return fmt.Errorf("组件清单资产重复: %s", key)
 		}
 		seen[key] = struct{}{}
+	}
+	return nil
+}
+
+func validateOfficialURL(raw string) error {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme != "https" || parsed.User != nil || parsed.Port() != "" || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Path == "" || parsed.Path[0] != '/' || !contains([]string{"github.com", "repo.jellyfin.org"}, strings.ToLower(parsed.Hostname())) {
+		return errors.New("组件官方资产必须来自批准的无凭据 HTTPS 主机")
+	}
+	return nil
+}
+
+func validateCandidateURL(raw, official string) error {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme != "https" || parsed.User != nil || parsed.Port() != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return errors.New("组件下载候选源必须是无凭据 HTTPS URL")
+	}
+	host := strings.ToLower(parsed.Hostname())
+	if host == "github.com" || host == "repo.jellyfin.org" {
+		if raw != official {
+			return errors.New("组件官方下载候选源与官方资产不一致")
+		}
+		return nil
+	}
+	if !contains([]string{"ghproxy.net", "ghfast.top", "gh-proxy.com"}, host) || parsed.Path != "/"+official {
+		return errors.New("组件下载候选源不在批准的公开加速列表中")
 	}
 	return nil
 }

@@ -77,6 +77,41 @@ func TestRegistrationPreservesManagedContentConfiguration(t *testing.T) {
 	}
 }
 
+func TestValidateNodeRegistrationAcceptsCanonicalWindowsSharedDirectories(t *testing.T) {
+	for name, directory := range map[string]protocol.SharedDirectory{
+		"盘符路径":   {ID: "downloads", Name: "下载", Path: `C:\Users\test\Downloads`},
+		"UNC 路径": {ID: "media", Name: "媒体", Path: `\\nas\media`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			request := validNodeRegistration(t, "windows.tail-name.ts.net")
+			request.Platform = "windows"
+			request.SharedDirectories = []protocol.SharedDirectory{directory}
+			if err := validateNodeRegistration(request); err != nil {
+				t.Fatalf("规范 Windows 共享目录被拒绝: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateNodeRegistrationRejectsNonCanonicalWindowsSharedDirectories(t *testing.T) {
+	for name, directoryPath := range map[string]string{
+		"盘符相对路径":  `C:Users\test\Downloads`,
+		"正斜杠":     `C:/Users/test/Downloads`,
+		"父目录段":    `C:\Users\test\..\Downloads`,
+		"重复分隔符":   `C:\Users\\test\Downloads`,
+		"不完整 UNC": `\\nas`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			request := validNodeRegistration(t, "windows.tail-name.ts.net")
+			request.Platform = "windows"
+			request.SharedDirectories = []protocol.SharedDirectory{{ID: "downloads", Name: "下载", Path: directoryPath}}
+			if err := validateNodeRegistration(request); err == nil {
+				t.Fatal("非规范 Windows 共享目录未被拒绝")
+			}
+		})
+	}
+}
+
 func TestRegistrationRejectsUnsafeManagedContentConfiguration(t *testing.T) {
 	_, signingKey, _ := ed25519.GenerateKey(rand.Reader)
 	service, err := NewRegistrationService(NewMemoryDeviceStore(), signingKey, "control", "https://home.example.com", time.Now, rand.Reader)

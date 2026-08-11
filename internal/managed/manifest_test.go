@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -16,7 +17,7 @@ func TestFetchManifestVerifiesSignature(t *testing.T) {
 	}
 	manifest := Manifest{SchemaVersion: ManifestSchema, Artifacts: []Artifact{{
 		Component: "filebrowser", Version: "0.3.5", Platform: "darwin", Arch: "arm64",
-		URL: "https://github.com/example/filebrowser", Filename: "filebrowser", Format: "binary", Size: 10,
+		URL: "https://github.com/example/filebrowser", URLs: []string{"https://github.com/example/filebrowser"}, Filename: "filebrowser", Format: "binary", Size: 10,
 		SHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 	}}}
 	envelope, err := SignManifest(manifest, privateKey)
@@ -38,10 +39,27 @@ func TestFetchManifestVerifiesSignature(t *testing.T) {
 func TestValidateManifestRejectsNonHexDigest(t *testing.T) {
 	manifest := Manifest{SchemaVersion: ManifestSchema, Artifacts: []Artifact{{
 		Component: "filebrowser", Version: "0.3.5", Platform: "darwin", Arch: "arm64",
-		URL: "https://github.com/example/filebrowser", Filename: "filebrowser", Format: "binary", Size: 10,
+		URL: "https://github.com/example/filebrowser", URLs: []string{"https://github.com/example/filebrowser"}, Filename: "filebrowser", Format: "binary", Size: 10,
 		SHA256: "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
 	}}}
 	if err := ValidateManifest(manifest); err == nil {
 		t.Fatal("非十六进制 SHA-256 未被拒绝")
+	}
+}
+
+func TestValidateManifestRejectsModifiedAcceleratorURL(t *testing.T) {
+	official := "https://github.com/example/project/releases/download/v1/file.zip"
+	base := Artifact{Component: "filebrowser", Version: "1.5.1-stable", Platform: "darwin", Arch: "arm64", URL: official, Filename: "filebrowser", Format: "binary", Size: 10, SHA256: strings.Repeat("a", 64)}
+	for _, candidate := range []string{
+		"https://ghproxy.net/extra/" + official,
+		"https://ghproxy.net/" + official + "?token=1",
+		"https://ghproxy.net:443/" + official,
+		"https://ghproxy.net/" + official + "#fragment",
+	} {
+		artifact := base
+		artifact.URLs = []string{candidate}
+		if err := ValidateManifest(Manifest{SchemaVersion: ManifestSchema, Artifacts: []Artifact{artifact}}); err == nil {
+			t.Fatalf("篡改后的代理 URL 未被拒绝: %s", candidate)
+		}
 	}
 }

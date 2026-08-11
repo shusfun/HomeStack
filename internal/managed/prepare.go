@@ -24,8 +24,17 @@ const (
 )
 
 func Prepare(ctx context.Context, stateDir, manifestURL string, publicKey ed25519.PublicKey, existing *Profile) (Profile, error) {
+	return PrepareWithProgress(ctx, stateDir, manifestURL, publicKey, existing, nil)
+}
+
+func PrepareWithProgress(ctx context.Context, stateDir, manifestURL string, publicKey ed25519.PublicKey, existing *Profile, report ProgressFunc) (Profile, error) {
 	if existing != nil {
 		if err := ValidateProfile(*existing); err == nil {
+			for _, installation := range []Installation{existing.FileBrowser, existing.Jellyfin, existing.FFmpeg} {
+				if report != nil {
+					report(Progress{Component: installation.Component, Version: installation.Version, Phase: PhaseReady, SourceHost: installation.SourceHost})
+				}
+			}
 			return *existing, nil
 		}
 	}
@@ -52,9 +61,14 @@ func Prepare(ctx context.Context, stateDir, manifestURL string, publicKey ed2551
 	if fileArtifact.Version != FileBrowserVersion || mediaArtifact.Version != JellyfinVersion || ffmpegArtifact.Version != FFmpegVersion {
 		return Profile{}, fmt.Errorf("组件清单版本与应用契约不一致: filebrowser=%s jellyfin=%s ffmpeg=%s", fileArtifact.Version, mediaArtifact.Version, ffmpegArtifact.Version)
 	}
+	if report != nil {
+		for _, artifact := range []Artifact{fileArtifact, mediaArtifact, ffmpegArtifact} {
+			report(Progress{Component: artifact.Component, Version: artifact.Version, Phase: PhasePending, Total: artifact.Size})
+		}
+	}
 	managedState := filepath.Join(stateDir, "managed")
 	mediaPassword, moduleSecrets := existingManagedCredentials(existing, managedState)
-	installer := Installer{Client: client, Root: filepath.Join(stateDir, "components")}
+	installer := Installer{Client: client, Root: filepath.Join(stateDir, "components"), Progress: report}
 	fileBrowser, err := ensureCurrentInstallation(ctx, installer, fileArtifact, existingInstallation(existing, "filebrowser"))
 	if err != nil {
 		return Profile{}, err
@@ -98,6 +112,7 @@ func existingInstallation(profile *Profile, component string) Installation {
 
 func ensureCurrentInstallation(ctx context.Context, installer Installer, artifact Artifact, existing Installation) (Installation, error) {
 	if validateInstallation(existing, artifact.Component, artifact.Version) == nil && strings.EqualFold(existing.ArtifactSHA256, artifact.SHA256) {
+		installer.report(artifact, PhaseReady, artifact.Size, artifact.Size, 0, existing.SourceHost, "")
 		return existing, nil
 	}
 	return installer.Ensure(ctx, artifact)

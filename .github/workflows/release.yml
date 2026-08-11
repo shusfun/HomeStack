@@ -344,15 +344,28 @@ jobs:
         env:
           UPDATE_PRIVATE_KEY: ${{ secrets.HOMESTACK_UPDATE_PRIVATE_KEY }}
         run: |
+          IFS=$'\t' read -r probe_asset probe_size < <(go run scripts/component-manifest.go \
+            --lock scripts/components.lock.json \
+            --print-probe filebrowser/linux/amd64)
+          [[ -n "$probe_asset" && "$probe_size" =~ ^[0-9]+$ ]]
+          available=0
+          for candidate in "https://ghproxy.net/${probe_asset}" "https://ghfast.top/${probe_asset}" "https://gh-proxy.com/${probe_asset}" "$probe_asset"; do
+            probe=$(curl -sS -L --range 0-65535 --connect-timeout 8 --max-time 20 -D - -o /dev/null -w $'\nHOMESTACK_STATUS:%{http_code}\n' "$candidate") || probe=""
+            status=$(printf '%s\n' "$probe" | sed -n 's/^HOMESTACK_STATUS://p' | tail -n 1)
+            content_range=$(printf '%s\n' "$probe" | tr -d '\r' | awk 'tolower($1)=="content-range:" {value=$0} END {sub(/^[^:]*:[[:space:]]*/, "", value); print value}')
+            if [[ "$status" == "206" && "$content_range" == "bytes 0-65535/$probe_size" ]]; then
+              available=$((available + 1))
+            else
+              echo "公开组件下载节点不可用: ${candidate%%/https://*} HTTP ${status:-000} Content-Range ${content_range:-缺失}" >&2
+            fi
+          done
+          [[ "$available" -gt 0 ]] || { echo "所有公开组件下载节点均不可用" >&2; exit 1; }
           go run scripts/component-manifest.go \
             --output dist/components.json \
-            --dist dist \
-            --repository "$GITHUB_REPOSITORY" \
-            --tag "$RELEASE_TAG" \
+            --lock scripts/components.lock.json \
             --private-key "$UPDATE_PRIVATE_KEY"
           test -s dist/components.json
-          component_asset_count=$(find dist -maxdepth 1 -type f \( -name 'filebrowser_*' -o -name 'jellyfin_*' -o -name 'jellyfin-ffmpeg_*' \) | wc -l)
-          test "$component_asset_count" -eq 17
+          test "$(find dist -maxdepth 1 -type f \( -name 'filebrowser_*' -o -name 'jellyfin_*' -o -name 'jellyfin-ffmpeg_*' \) | wc -l)" -eq 0
 
       - name: 创建 GitHub Release
         shell: bash
@@ -383,7 +396,7 @@ jobs:
 
           自动安装与更新直接从本 Release 下载，使用客户端内置或安装时提供的 Ed25519 公钥验证，不经过 HomeStack VPS。仅自动安装器和更新器实际消费的载荷附带 \`.sig\`。
 
-          FileBrowser Quantum、Jellyfin 与 Jellyfin FFmpeg 的固定官方资产镜像在本 Release。组件清单记录平台、版本、大小和 SHA-256，并使用同一 Ed25519 发布密钥签名。
+          FileBrowser Quantum、Jellyfin 与 Jellyfin FFmpeg 由 App 按签名组件清单从公开候选源下载，清单固定平台、版本、大小和 SHA-256。
 
           当前 macOS 仅使用 ad-hoc codesign 且未公证，Windows 未做 Authenticode；Gatekeeper 或 SmartScreen 可能显示来源警告。
           EOF

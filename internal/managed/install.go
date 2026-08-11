@@ -34,6 +34,7 @@ type Installation struct {
 	Component      string `json:"component"`
 	Version        string `json:"version"`
 	ArtifactSHA256 string `json:"artifact_sha256"`
+	SourceHost     string `json:"source_host,omitempty"`
 	Executable     string `json:"executable"`
 	Root           string `json:"root"`
 	WebDir         string `json:"web_dir,omitempty"`
@@ -41,8 +42,9 @@ type Installation struct {
 }
 
 type Installer struct {
-	Client *http.Client
-	Root   string
+	Client   *http.Client
+	Root     string
+	Progress ProgressFunc
 }
 
 func (i Installer) Ensure(ctx context.Context, artifact Artifact) (Installation, error) {
@@ -50,62 +52,91 @@ func (i Installer) Ensure(ctx context.Context, artifact Artifact) (Installation,
 	defer installLock.Unlock()
 
 	if i.Client == nil || !filepath.IsAbs(i.Root) {
-		return Installation{}, errors.New("托管组件安装器配置无效")
+		err := errors.New("托管组件安装器配置无效")
+		i.report(artifact, PhaseError, 0, artifact.Size, 0, "", err.Error())
+		return Installation{}, err
 	}
 	digest, err := hex.DecodeString(artifact.SHA256)
 	if err != nil || len(digest) != sha256.Size {
-		return Installation{}, errors.New("托管组件资产 SHA-256 无效")
+		err := errors.New("托管组件资产 SHA-256 无效")
+		i.report(artifact, PhaseError, 0, artifact.Size, 0, "", err.Error())
+		return Installation{}, err
 	}
 	root := filepath.Join(i.Root, artifact.Component, artifact.Version, runtime.GOOS+"-"+runtime.GOARCH+"-"+hex.EncodeToString(digest[:8]))
 	marker := filepath.Join(root, "installation.json")
 	if installed, err := loadInstallation(marker, artifact); err == nil {
+		i.report(artifact, PhaseReady, artifact.Size, artifact.Size, 0, installed.SourceHost, "")
 		return installed, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return Installation{}, err
+		return i.installationError(artifact, "", err)
 	}
 	if err := os.MkdirAll(filepath.Dir(root), 0o700); err != nil {
-		return Installation{}, fmt.Errorf("创建组件目录失败: %w", err)
+		return i.installationError(artifact, "", fmt.Errorf("创建组件目录失败: %w", err))
 	}
 	stage, err := os.MkdirTemp(filepath.Dir(root), ".install-*")
 	if err != nil {
-		return Installation{}, fmt.Errorf("创建组件暂存目录失败: %w", err)
+		return i.installationError(artifact, "", fmt.Errorf("创建组件暂存目录失败: %w", err))
 	}
 	defer os.RemoveAll(stage)
 	archivePath := filepath.Join(stage, artifact.Filename)
-	if err := downloadArtifact(ctx, i.Client, artifact, archivePath); err != nil {
+	sourceURL, sourceHost, err := selectSource(ctx, i.Client, artifact, i.Progress)
+	if err != nil {
+		i.report(artifact, PhaseError, 0, artifact.Size, 0, "", err.Error())
+		return Installation{}, err
+	}
+	if err := downloadArtifact(ctx, i.Client, artifact, sourceURL, sourceHost, archivePath, i.Progress); err != nil {
+		i.report(artifact, PhaseError, 0, artifact.Size, 0, sourceHost, err.Error())
 		return Installation{}, err
 	}
 	payload := filepath.Join(stage, "payload")
 	if err := os.Mkdir(payload, 0o700); err != nil {
-		return Installation{}, err
+		return i.installationError(artifact, sourceHost, err)
 	}
+	i.report(artifact, PhaseExtracting, artifact.Size, artifact.Size, 0, sourceHost, "")
 	if err := extractArtifact(archivePath, payload, artifact.Format); err != nil {
-		return Installation{}, err
+		return i.installationError(artifact, sourceHost, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return i.installationError(artifact, sourceHost, err)
 	}
 	installed, err := inspectInstallation(payload, artifact)
 	if err != nil {
-		return Installation{}, err
+		return i.installationError(artifact, sourceHost, err)
 	}
 	installed.Root = root
+	installed.SourceHost = sourceHost
 	installed.Executable = relocatePath(installed.Executable, payload, root)
 	installed.WebDir = relocatePath(installed.WebDir, payload, root)
 	installed.FFmpeg = relocatePath(installed.FFmpeg, payload, root)
 	markerData, err := json.Marshal(installed)
 	if err != nil {
-		return Installation{}, err
+		return i.installationError(artifact, sourceHost, err)
 	}
 	if err := os.WriteFile(filepath.Join(payload, "installation.json"), markerData, 0o600); err != nil {
-		return Installation{}, fmt.Errorf("写入组件安装标记失败: %w", err)
+		return i.installationError(artifact, sourceHost, fmt.Errorf("写入组件安装标记失败: %w", err))
 	}
 	if _, err := os.Stat(root); err == nil {
-		return Installation{}, fmt.Errorf("组件安装目标已存在但标记无效: %s", root)
+		return i.installationError(artifact, sourceHost, fmt.Errorf("组件安装目标已存在但标记无效: %s", root))
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return Installation{}, err
+		return i.installationError(artifact, sourceHost, err)
 	}
+	i.report(artifact, PhaseInstalling, artifact.Size, artifact.Size, 0, sourceHost, "")
 	if err := os.Rename(payload, root); err != nil {
-		return Installation{}, fmt.Errorf("提交组件安装失败: %w", err)
+		return i.installationError(artifact, sourceHost, fmt.Errorf("提交组件安装失败: %w", err))
 	}
+	i.report(artifact, PhaseReady, artifact.Size, artifact.Size, 0, sourceHost, "")
 	return installed, nil
+}
+
+func (i Installer) installationError(artifact Artifact, sourceHost string, err error) (Installation, error) {
+	i.report(artifact, PhaseError, 0, artifact.Size, 0, sourceHost, err.Error())
+	return Installation{}, err
+}
+
+func (i Installer) report(artifact Artifact, phase string, downloaded, total, speed int64, sourceHost, detail string) {
+	if i.Progress != nil {
+		i.Progress(Progress{Component: artifact.Component, Version: artifact.Version, Phase: phase, Downloaded: downloaded, Total: total, SpeedBPS: speed, SourceHost: sourceHost, Error: detail})
+	}
 }
 
 func loadInstallation(path string, artifact Artifact) (Installation, error) {
@@ -127,15 +158,19 @@ func loadInstallation(path string, artifact Artifact) (Installation, error) {
 	return installed, nil
 }
 
-func downloadArtifact(ctx context.Context, client *http.Client, artifact Artifact, target string) error {
+func downloadArtifact(ctx context.Context, client *http.Client, artifact Artifact, sourceURL, sourceHost, target string, report ProgressFunc) error {
 	file, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
 	hash := sha256.New()
 	offset := int64(0)
+	downloadStarted := time.Now()
+	if report != nil {
+		report(Progress{Component: artifact.Component, Version: artifact.Version, Phase: PhaseDownloading, Total: artifact.Size, SourceHost: sourceHost})
+	}
 	for attempt := 1; offset < artifact.Size; attempt++ {
-		request, requestErr := http.NewRequestWithContext(ctx, http.MethodGet, artifact.URL, nil)
+		request, requestErr := http.NewRequestWithContext(ctx, http.MethodGet, sourceURL, nil)
 		if requestErr != nil {
 			_ = file.Close()
 			return requestErr
@@ -173,7 +208,13 @@ func downloadArtifact(ctx context.Context, client *http.Client, artifact Artifac
 			}
 		}
 		remaining := artifact.Size - offset
-		written, copyErr := io.Copy(io.MultiWriter(file, hash), io.LimitReader(response.Body, remaining+1))
+		progress := &progressWriter{written: offset, total: artifact.Size, started: downloadStarted}
+		progress.report = func(downloaded, speed int64) {
+			if report != nil {
+				report(Progress{Component: artifact.Component, Version: artifact.Version, Phase: PhaseDownloading, Downloaded: downloaded, Total: artifact.Size, SpeedBPS: speed, SourceHost: sourceHost})
+			}
+		}
+		written, copyErr := io.Copy(io.MultiWriter(file, hash, progress), io.LimitReader(response.Body, remaining+1))
 		closeErr := response.Body.Close()
 		offset += written
 		if written > remaining {
@@ -204,6 +245,9 @@ func downloadArtifact(ctx context.Context, client *http.Client, artifact Artifac
 	}
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("关闭 %s 下载文件失败: %w", artifact.Component, err)
+	}
+	if report != nil {
+		report(Progress{Component: artifact.Component, Version: artifact.Version, Phase: PhaseVerifying, Downloaded: artifact.Size, Total: artifact.Size, SourceHost: sourceHost})
 	}
 	if actual := hex.EncodeToString(hash.Sum(nil)); !strings.EqualFold(actual, artifact.SHA256) {
 		return fmt.Errorf("%s SHA-256 校验失败", artifact.Component)

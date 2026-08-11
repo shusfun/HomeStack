@@ -20,9 +20,9 @@ import (
 
 func TestInstallerRejectsDigestAndArchiveTraversal(t *testing.T) {
 	archive := zipBytes(t, "../escape", []byte("bad"))
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) { _, _ = writer.Write(archive) }))
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) { serveArtifact(writer, request, archive) }))
 	defer server.Close()
-	artifact := Artifact{Component: "jellyfin", Version: "10.11.11", Platform: runtime.GOOS, Arch: runtime.GOARCH, URL: server.URL, Filename: "jellyfin.zip", Format: "zip", Size: int64(len(archive)), SHA256: fmt.Sprintf("%x", sha256.Sum256(archive))}
+	artifact := Artifact{Component: "jellyfin", Version: "10.11.11", Platform: runtime.GOOS, Arch: runtime.GOARCH, URL: server.URL, URLs: []string{server.URL}, Filename: "jellyfin.zip", Format: "zip", Size: int64(len(archive)), SHA256: fmt.Sprintf("%x", sha256.Sum256(archive))}
 	installer := Installer{Client: server.Client(), Root: t.TempDir()}
 	if _, err := installer.Ensure(context.Background(), artifact); err == nil {
 		t.Fatal("ZIP 路径穿越未被拒绝")
@@ -36,9 +36,12 @@ func TestInstallerRejectsDigestAndArchiveTraversal(t *testing.T) {
 func TestInstallerIsIdempotentForBinary(t *testing.T) {
 	data := []byte("filebrowser")
 	requests := 0
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) { requests++; _, _ = writer.Write(data) }))
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requests++
+		serveArtifact(writer, request, data)
+	}))
 	defer server.Close()
-	artifact := Artifact{Component: "filebrowser", Version: "0.3.5", Platform: runtime.GOOS, Arch: runtime.GOARCH, URL: server.URL, Filename: "filebrowser", Format: "binary", Size: int64(len(data)), SHA256: fmt.Sprintf("%x", sha256.Sum256(data))}
+	artifact := Artifact{Component: "filebrowser", Version: "0.3.5", Platform: runtime.GOOS, Arch: runtime.GOARCH, URL: server.URL, URLs: []string{server.URL}, Filename: "filebrowser", Format: "binary", Size: int64(len(data)), SHA256: fmt.Sprintf("%x", sha256.Sum256(data))}
 	installer := Installer{Client: server.Client(), Root: t.TempDir()}
 	first, err := installer.Ensure(context.Background(), artifact)
 	if err != nil {
@@ -48,7 +51,7 @@ func TestInstallerIsIdempotentForBinary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if requests != 1 || first.Executable != second.Executable {
+	if requests != 2 || first.Executable != second.Executable {
 		t.Fatalf("重复安装未复用现有组件: requests=%d first=%+v second=%+v", requests, first, second)
 	}
 	if info, err := os.Stat(first.Executable); err != nil || info.Mode().Perm() != 0o700 {
@@ -88,8 +91,8 @@ func TestDownloadArtifactResumesInterruptedResponse(t *testing.T) {
 	defer server.Close()
 
 	target := filepath.Join(t.TempDir(), "component.bin")
-	artifact := Artifact{Component: "jellyfin-ffmpeg", URL: server.URL, Size: int64(len(data)), SHA256: fmt.Sprintf("%x", sha256.Sum256(data))}
-	if err := downloadArtifact(context.Background(), server.Client(), artifact, target); err != nil {
+	artifact := Artifact{Component: "jellyfin-ffmpeg", URL: server.URL, URLs: []string{server.URL}, Size: int64(len(data)), SHA256: fmt.Sprintf("%x", sha256.Sum256(data))}
+	if err := downloadArtifact(context.Background(), server.Client(), artifact, server.URL, "test", target, nil); err != nil {
 		t.Fatal(err)
 	}
 	actual, err := os.ReadFile(target)
@@ -128,16 +131,16 @@ func TestInstallerSerializesConcurrentInstall(t *testing.T) {
 	var requests atomic.Int32
 	firstRequest := make(chan struct{})
 	release := make(chan struct{})
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if requests.Add(1) == 1 {
 			close(firstRequest)
 			<-release
 		}
-		_, _ = writer.Write(data)
+		serveArtifact(writer, request, data)
 	}))
 	defer server.Close()
 
-	artifact := Artifact{Component: "filebrowser", Version: "0.3.5", Platform: runtime.GOOS, Arch: runtime.GOARCH, URL: server.URL, Filename: "filebrowser", Format: "binary", Size: int64(len(data)), SHA256: fmt.Sprintf("%x", sha256.Sum256(data))}
+	artifact := Artifact{Component: "filebrowser", Version: "0.3.5", Platform: runtime.GOOS, Arch: runtime.GOARCH, URL: server.URL, URLs: []string{server.URL}, Filename: "filebrowser", Format: "binary", Size: int64(len(data)), SHA256: fmt.Sprintf("%x", sha256.Sum256(data))}
 	installer := Installer{Client: server.Client(), Root: t.TempDir()}
 	results := make(chan Installation, 2)
 	errors := make(chan error, 2)
@@ -175,9 +178,93 @@ func TestInstallerSerializesConcurrentInstall(t *testing.T) {
 			t.Fatalf("并发安装未复用同一组件: first=%s second=%s", executable, installed.Executable)
 		}
 	}
-	if requests.Load() != 1 {
+	if requests.Load() != 2 {
 		t.Fatalf("并发安装重复下载组件: requests=%d", requests.Load())
 	}
+}
+
+func TestInstallerReportsOrderedStagesAndComponentError(t *testing.T) {
+	data := []byte("filebrowser")
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) { serveArtifact(writer, request, data) }))
+	defer server.Close()
+	artifact := Artifact{Component: "filebrowser", Version: "0.3.5", Platform: runtime.GOOS, Arch: runtime.GOARCH, URL: server.URL, URLs: []string{server.URL}, Filename: "filebrowser", Format: "binary", Size: int64(len(data)), SHA256: fmt.Sprintf("%x", sha256.Sum256(data))}
+	var phases []string
+	installer := Installer{Client: server.Client(), Root: t.TempDir(), Progress: func(progress Progress) { phases = append(phases, progress.Phase) }}
+	if _, err := installer.Ensure(context.Background(), artifact); err != nil {
+		t.Fatal(err)
+	}
+	assertPhaseOrder(t, phases, []string{PhaseSelecting, PhaseDownloading, PhaseVerifying, PhaseExtracting, PhaseInstalling, PhaseReady})
+
+	broken := zipBytes(t, "../escape", []byte("bad"))
+	brokenServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) { serveArtifact(writer, request, broken) }))
+	defer brokenServer.Close()
+	phases = nil
+	artifact = Artifact{Component: "jellyfin", Version: "10.11.11", Platform: runtime.GOOS, Arch: runtime.GOARCH, URL: brokenServer.URL, URLs: []string{brokenServer.URL}, Filename: "jellyfin.zip", Format: "zip", Size: int64(len(broken)), SHA256: fmt.Sprintf("%x", sha256.Sum256(broken))}
+	installer.Client = brokenServer.Client()
+	if _, err := installer.Ensure(context.Background(), artifact); err == nil {
+		t.Fatal("损坏安装未返回错误")
+	}
+	if len(phases) == 0 || phases[len(phases)-1] != PhaseError {
+		t.Fatalf("组件失败未进入 error 阶段: %v", phases)
+	}
+}
+
+func TestInstallerCancellationCleansStagingDirectory(t *testing.T) {
+	data := bytes.Repeat([]byte("component"), 16<<10)
+	downloadStarted := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Range") != "" {
+			serveArtifact(writer, request, data)
+			return
+		}
+		close(downloadStarted)
+		<-request.Context().Done()
+	}))
+	defer server.Close()
+	root := t.TempDir()
+	artifact := Artifact{Component: "filebrowser", Version: "0.3.5", Platform: runtime.GOOS, Arch: runtime.GOARCH, URL: server.URL, URLs: []string{server.URL}, Filename: "filebrowser", Format: "binary", Size: int64(len(data)), SHA256: fmt.Sprintf("%x", sha256.Sum256(data))}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := (Installer{Client: server.Client(), Root: root}).Ensure(ctx, artifact)
+		done <- err
+	}()
+	<-downloadStarted
+	cancel()
+	if err := <-done; err == nil {
+		t.Fatal("取消下载未返回错误")
+	}
+	entries, err := os.ReadDir(filepath.Join(root, artifact.Component, artifact.Version))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("取消后仍残留暂存目录: %v", entries)
+	}
+}
+
+func assertPhaseOrder(t *testing.T, actual, expected []string) {
+	t.Helper()
+	position := 0
+	for _, phase := range actual {
+		if position < len(expected) && phase == expected[position] {
+			position++
+		}
+	}
+	if position != len(expected) {
+		t.Fatalf("组件阶段顺序错误: actual=%v expected=%v", actual, expected)
+	}
+}
+
+func serveArtifact(writer http.ResponseWriter, request *http.Request, data []byte) {
+	if request.Header.Get("Range") != "" {
+		probeSize := min(int64(len(data)), sourceProbeBytes)
+		writer.Header().Set("Content-Range", fmt.Sprintf("bytes 0-%d/%d", probeSize-1, len(data)))
+		writer.WriteHeader(http.StatusPartialContent)
+		_, _ = writer.Write(data[:probeSize])
+		return
+	}
+	_, _ = writer.Write(data)
 }
 
 func zipBytes(t *testing.T, name string, data []byte) []byte {
