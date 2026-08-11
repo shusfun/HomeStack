@@ -21,6 +21,10 @@ type ConfigHelper interface {
 	LinkProvider(context.Context, string, ProviderCredentials) (Status, error)
 }
 
+type ControlUpdateInstaller interface {
+	InstallControlUpdate(context.Context, ControlUpdateInstallation) error
+}
+
 type SocketClient struct {
 	Path string
 }
@@ -54,6 +58,11 @@ func (c SocketClient) ReconfigureDomain(ctx context.Context, publicHost string) 
 
 func (c SocketClient) LinkProvider(ctx context.Context, provider string, credentials ProviderCredentials) (Status, error) {
 	return c.call(ctx, HelperRequest{Operation: "link_provider", Provider: provider, Credentials: &credentials})
+}
+
+func (c SocketClient) InstallControlUpdate(ctx context.Context, update ControlUpdateInstallation) error {
+	_, err := c.call(ctx, HelperRequest{Operation: "install_control_update", ControlUpdate: &update})
+	return err
 }
 
 func (c SocketClient) call(ctx context.Context, request HelperRequest) (Status, error) {

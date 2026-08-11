@@ -53,14 +53,24 @@ type Status struct {
 }
 
 type HelperRequest struct {
-	Operation   string               `json:"operation"`
-	Config      *Configuration       `json:"config,omitempty"`
-	PublicHost  string               `json:"public_host,omitempty"`
-	Provider    string               `json:"provider,omitempty"`
-	Credentials *ProviderCredentials `json:"credentials,omitempty"`
+	Operation     string                     `json:"operation"`
+	Config        *Configuration             `json:"config,omitempty"`
+	PublicHost    string                     `json:"public_host,omitempty"`
+	Provider      string                     `json:"provider,omitempty"`
+	Credentials   *ProviderCredentials       `json:"credentials,omitempty"`
+	ControlUpdate *ControlUpdateInstallation `json:"control_update,omitempty"`
 }
 
 type HelperResponse struct {
 	Status Status `json:"status"`
 	Error  string `json:"error,omitempty"`
+}
+
+type ControlUpdateInstallation struct {
+	Version     string `json:"version"`
+	ArchivePath string `json:"archive_path"`
+	Filename    string `json:"filename"`
+	Size        int64  `json:"size"`
+	Digest      string `json:"digest"`
+	Signature   string `json:"signature"`
 }

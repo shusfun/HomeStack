@@ -19,6 +19,7 @@ import (
 
 	"github.com/wangshangbin/homestack/internal/buildinfo"
 	"github.com/wangshangbin/homestack/internal/control"
+	"github.com/wangshangbin/homestack/internal/controlupdate"
 	setupapi "github.com/wangshangbin/homestack/internal/setup"
 	"github.com/wangshangbin/homestack/internal/web"
 )
@@ -83,10 +84,18 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	helper := setupapi.SocketClient{}
+	updater, err := controlupdate.New(controlupdate.Options{
+		CurrentVersion: buildinfo.Version, ManifestURL: buildinfo.UpdateManifestURL, PublicKey: buildinfo.UpdatePublicKey,
+		StateDir: settings.stateDir, Installer: helper,
+	})
+	if err != nil {
+		return err
+	}
 	server, err := control.NewServer(control.ServerOptions{
 		Authenticator: authenticator, Owners: owners, Devices: devices, Activations: activations,
 		SigningKey: signingKey, SigningKeyID: settings.signingKeyID, PublicURL: settings.publicURL,
-		ConfigHelper: setupapi.SocketClient{},
+		ConfigHelper: helper, ControlUpdater: updater,
 	})
 	if err != nil {
 		return err

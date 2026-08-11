@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wangshangbin/homestack/internal/buildinfo"
+	"github.com/wangshangbin/homestack/internal/controlupdate"
 	"github.com/wangshangbin/homestack/internal/protocol"
 	"github.com/wangshangbin/homestack/internal/publicurl"
 	"github.com/wangshangbin/homestack/internal/secure"
@@ -22,31 +24,33 @@ import (
 )
 
 type ServerOptions struct {
-	Authenticator Authenticator
-	Owners        *OwnerStore
-	Devices       *DeviceStore
-	Activations   *ActivationStore
-	Registration  *RegistrationService
-	ConfigHelper  setupapi.ConfigHelper
-	SigningKey    ed25519.PrivateKey
-	SigningKeyID  string
-	PublicURL     string
-	Now           func() time.Time
-	Random        io.Reader
+	Authenticator  Authenticator
+	Owners         *OwnerStore
+	Devices        *DeviceStore
+	Activations    *ActivationStore
+	Registration   *RegistrationService
+	ConfigHelper   setupapi.ConfigHelper
+	ControlUpdater controlUpdater
+	SigningKey     ed25519.PrivateKey
+	SigningKeyID   string
+	PublicURL      string
+	Now            func() time.Time
+	Random         io.Reader
 }
 
 type Server struct {
-	authenticator Authenticator
-	owners        *OwnerStore
-	devices       *DeviceStore
-	activations   *ActivationStore
-	registration  *RegistrationService
-	configHelper  setupapi.ConfigHelper
-	signingKey    ed25519.PrivateKey
-	signingKeyID  string
-	publicURL     string
-	now           func() time.Time
-	random        io.Reader
+	authenticator  Authenticator
+	owners         *OwnerStore
+	devices        *DeviceStore
+	activations    *ActivationStore
+	registration   *RegistrationService
+	configHelper   setupapi.ConfigHelper
+	controlUpdater controlUpdater
+	signingKey     ed25519.PrivateKey
+	signingKeyID   string
+	publicURL      string
+	now            func() time.Time
+	random         io.Reader
 }
 
 type ticketResponse struct {
@@ -67,6 +71,13 @@ type appTokenIssuer interface {
 
 type reauthAuthorizer interface {
 	ConsumeReauth(*http.Request, string) bool
+}
+
+type controlUpdater interface {
+	Status() controlupdate.Status
+	Check(context.Context) (controlupdate.Status, error)
+	Download(context.Context) (controlupdate.Status, error)
+	Install(context.Context) (controlupdate.Status, error)
 }
 
 func NewServer(options ServerOptions) (*Server, error) {
@@ -101,7 +112,7 @@ func NewServer(options ServerOptions) (*Server, error) {
 			return nil, err
 		}
 	}
-	server := &Server{authenticator: options.Authenticator, owners: options.Owners, devices: options.Devices, activations: options.Activations, registration: options.Registration, configHelper: options.ConfigHelper, signingKey: options.SigningKey, signingKeyID: options.SigningKeyID, publicURL: strings.TrimRight(options.PublicURL, "/"), now: options.Now, random: options.Random}
+	server := &Server{authenticator: options.Authenticator, owners: options.Owners, devices: options.Devices, activations: options.Activations, registration: options.Registration, configHelper: options.ConfigHelper, controlUpdater: options.ControlUpdater, signingKey: options.SigningKey, signingKeyID: options.SigningKeyID, publicURL: strings.TrimRight(options.PublicURL, "/"), now: options.Now, random: options.Random}
 	if manager, ok := options.Authenticator.(*AuthManager); ok && options.ConfigHelper != nil {
 		manager.SetProviderLinker(providerLinkService{owners: options.Owners, helper: options.ConfigHelper})
 	}
@@ -123,6 +134,10 @@ func (s *Server) Handler(static http.Handler) http.Handler {
 	mux.HandleFunc("GET /api/system/config", s.systemConfig)
 	mux.HandleFunc("POST /api/system/reconfigure", s.reconfigure)
 	mux.HandleFunc("POST /api/system/providers/{provider}/link", s.linkProvider)
+	mux.HandleFunc("GET /api/system/updates/status", s.controlUpdateStatus)
+	mux.HandleFunc("POST /api/system/updates/check", s.checkControlUpdate)
+	mux.HandleFunc("POST /api/system/updates/download", s.downloadControlUpdate)
+	mux.HandleFunc("POST /api/system/updates/install", s.installControlUpdate)
 	mux.HandleFunc("POST /api/device-activations", s.createActivation)
 	mux.HandleFunc("POST /api/auth/app/activate", s.activateApp)
 	mux.HandleFunc("POST /api/devices/register", s.registerDevice)
@@ -343,7 +358,7 @@ func (s *Server) health(writer http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) meta(writer http.ResponseWriter, request *http.Request) {
 	payload := map[string]any{
-		"surface": "control", "providers": s.authenticator.Metadata(), "signing_key_id": s.signingKeyID,
+		"surface": "control", "version": buildinfo.Version, "providers": s.authenticator.Metadata(), "signing_key_id": s.signingKeyID,
 		"signing_public_key": base64.RawURLEncoding.EncodeToString(s.signingKey.Public().(ed25519.PublicKey)),
 		"node":               map[string]any{"backend": "127.0.0.1:19444", "serve_port": 19443},
 		"me":                 nil,
@@ -355,6 +370,63 @@ func (s *Server) meta(writer http.ResponseWriter, request *http.Request) {
 	}
 	writer.Header().Set("Cache-Control", "no-store")
 	writeJSON(writer, http.StatusOK, payload)
+}
+
+func (s *Server) controlUpdateStatus(writer http.ResponseWriter, request *http.Request) {
+	if _, ok := s.requireIdentity(writer, request); !ok {
+		return
+	}
+	if s.controlUpdater == nil {
+		writeControlError(writer, http.StatusServiceUnavailable, "control_updater_unavailable", "Control 更新器未配置")
+		return
+	}
+	writeJSON(writer, http.StatusOK, s.controlUpdater.Status())
+}
+
+func (s *Server) checkControlUpdate(writer http.ResponseWriter, request *http.Request) {
+	s.runControlUpdateOperation(writer, request, http.StatusOK, s.controlUpdaterCheck)
+}
+
+func (s *Server) downloadControlUpdate(writer http.ResponseWriter, request *http.Request) {
+	s.runControlUpdateOperation(writer, request, http.StatusOK, s.controlUpdaterDownload)
+}
+
+func (s *Server) installControlUpdate(writer http.ResponseWriter, request *http.Request) {
+	s.runControlUpdateOperation(writer, request, http.StatusAccepted, s.controlUpdaterInstall)
+}
+
+type controlUpdateOperation func(context.Context) (controlupdate.Status, error)
+
+func (s *Server) runControlUpdateOperation(writer http.ResponseWriter, request *http.Request, successStatus int, operation func(context.Context) (controlupdate.Status, error)) {
+	if _, ok := s.requireIdentity(writer, request); !ok {
+		return
+	}
+	if request.Header.Get("Authorization") != "" || !s.validWriteOrigin(request) {
+		writeControlError(writer, http.StatusForbidden, "origin_rejected", "Control 更新只接受当前浏览器会话")
+		return
+	}
+	if s.controlUpdater == nil {
+		writeControlError(writer, http.StatusServiceUnavailable, "control_updater_unavailable", "Control 更新器未配置")
+		return
+	}
+	status, err := operation(request.Context())
+	if err != nil {
+		writeControlError(writer, http.StatusBadGateway, "control_update_failed", err.Error())
+		return
+	}
+	writeJSON(writer, successStatus, status)
+}
+
+func (s *Server) controlUpdaterCheck(ctx context.Context) (controlupdate.Status, error) {
+	return s.controlUpdater.Check(ctx)
+}
+
+func (s *Server) controlUpdaterDownload(ctx context.Context) (controlupdate.Status, error) {
+	return s.controlUpdater.Download(ctx)
+}
+
+func (s *Server) controlUpdaterInstall(ctx context.Context) (controlupdate.Status, error) {
+	return s.controlUpdater.Install(ctx)
 }
 
 func (s *Server) me(writer http.ResponseWriter, request *http.Request) {

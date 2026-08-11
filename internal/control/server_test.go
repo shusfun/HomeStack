@@ -15,8 +15,31 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wangshangbin/homestack/internal/controlupdate"
 	"github.com/wangshangbin/homestack/internal/protocol"
 )
+
+type testControlUpdater struct {
+	status controlupdate.Status
+	calls  []string
+}
+
+func (u *testControlUpdater) Status() controlupdate.Status { return u.status }
+func (u *testControlUpdater) Check(context.Context) (controlupdate.Status, error) {
+	u.calls = append(u.calls, "check")
+	u.status.State = "available"
+	return u.status, nil
+}
+func (u *testControlUpdater) Download(context.Context) (controlupdate.Status, error) {
+	u.calls = append(u.calls, "download")
+	u.status.State = "ready"
+	return u.status, nil
+}
+func (u *testControlUpdater) Install(context.Context) (controlupdate.Status, error) {
+	u.calls = append(u.calls, "install")
+	u.status.State = "installing"
+	return u.status, nil
+}
 
 type testAuthenticator struct {
 	identity  Identity
@@ -62,6 +85,40 @@ func TestMetaBootstrapsLoginWithoutAuthenticationError(t *testing.T) {
 	server.Handler(nil).ServeHTTP(protected, httptest.NewRequest(http.MethodGet, "/api/me", nil))
 	if protected.Code != http.StatusUnauthorized {
 		t.Fatalf("受保护的当前用户接口未保持鉴权: %d", protected.Code)
+	}
+}
+
+func TestControlUpdateAPIRequiresOwnerBrowserAndRunsUpdater(t *testing.T) {
+	server, _ := newTestControlServer(t, time.Now().UTC())
+	updater := &testControlUpdater{status: controlupdate.Status{State: "idle", CurrentVersion: "1.2.3", Signature: "等待校验"}}
+	server.controlUpdater = updater
+
+	status := httptest.NewRecorder()
+	server.Handler(nil).ServeHTTP(status, httptest.NewRequest(http.MethodGet, "/api/system/updates/status", nil))
+	if status.Code != http.StatusOK || !strings.Contains(status.Body.String(), `"current_version":"1.2.3"`) {
+		t.Fatalf("Control 更新状态错误: %d %s", status.Code, status.Body.String())
+	}
+
+	rejected := httptest.NewRecorder()
+	server.Handler(nil).ServeHTTP(rejected, httptest.NewRequest(http.MethodPost, "/api/system/updates/check", nil))
+	if rejected.Code != http.StatusForbidden {
+		t.Fatalf("缺少同源信息的更新操作未被拒绝: %d", rejected.Code)
+	}
+
+	for _, target := range []struct {
+		path string
+		code int
+	}{{"/api/system/updates/check", http.StatusOK}, {"/api/system/updates/download", http.StatusOK}, {"/api/system/updates/install", http.StatusAccepted}} {
+		request := httptest.NewRequest(http.MethodPost, target.path, nil)
+		request.Header.Set("Origin", "https://home.example.com")
+		response := httptest.NewRecorder()
+		server.Handler(nil).ServeHTTP(response, request)
+		if response.Code != target.code {
+			t.Fatalf("更新操作 %s 失败: %d %s", target.path, response.Code, response.Body.String())
+		}
+	}
+	if strings.Join(updater.calls, ",") != "check,download,install" {
+		t.Fatalf("更新调用顺序错误: %v", updater.calls)
 	}
 }
 

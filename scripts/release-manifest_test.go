@@ -39,7 +39,7 @@ func TestReleaseManifest(t *testing.T) {
 	if err := json.Unmarshal(manifestData, &manifest); err != nil {
 		t.Fatal(err)
 	}
-	if manifest.SchemaVersion != 1 || manifest.Version != "3.2.3" || len(manifest.Artifacts) != 8 {
+	if manifest.SchemaVersion != 1 || manifest.Version != "3.2.3" || len(manifest.Artifacts) != 10 {
 		t.Fatalf("发布清单元数据不完整: schema=%d version=%q artifacts=%d", manifest.SchemaVersion, manifest.Version, len(manifest.Artifacts))
 	}
 	for _, platform := range []string{"darwin", "windows", "linux"} {
@@ -51,6 +51,19 @@ func TestReleaseManifest(t *testing.T) {
 					}
 					break
 				}
+			}
+		}
+	}
+	for _, arch := range []string{"amd64", "arm64"} {
+		components := map[string]int{}
+		for _, current := range manifest.Artifacts {
+			if current.Platform == "linux" && current.Arch == arch {
+				components[current.Component]++
+			}
+		}
+		for _, component := range []string{"desktop", "control", "agent"} {
+			if components[component] != 1 {
+				t.Fatalf("linux/%s 必须且只能包含一个 %s 更新资产: %v", arch, component, components)
 			}
 		}
 	}
@@ -86,7 +99,7 @@ func TestReleaseManifest(t *testing.T) {
 	if len(expectedSignatures) != 0 {
 		t.Fatalf("缺少旁路签名: %v", expectedSignatures)
 	}
-	if len(entries) != 33 {
+	if len(entries) != 37 {
 		t.Fatalf("发布文件数量错误: %d", len(entries))
 	}
 	for _, name := range []string{"checksums.txt", "checksums.txt.sig", "latest.json.sig"} {
@@ -191,6 +204,7 @@ func releaseFixture(t *testing.T) (string, ed25519.PrivateKey, ed25519.PublicKey
 	dist := t.TempDir()
 	for _, arch := range []string{"amd64", "arm64"} {
 		writeFile(t, filepath.Join(dist, "homestack-control_3.2.3_linux_"+arch+".tar.gz"), "control")
+		writeTarGzip(t, filepath.Join(dist, "homestack-control-update_3.2.3_linux_"+arch+".tar.gz"), map[string]string{"homestack-control": "control", "homestack-config-helper": "helper"})
 		writeFile(t, filepath.Join(dist, "homestack-agent_3.2.3_linux_"+arch+".tar.gz"), "agent")
 		writeTarGzip(t, filepath.Join(dist, "homestack-agent-update_3.2.3_linux_"+arch+".tar.gz"), map[string]string{"homestack-agent": "binary"})
 		writeFile(t, filepath.Join(dist, "HomeStack_3.2.3_darwin_"+arch+".dmg"), "dmg")

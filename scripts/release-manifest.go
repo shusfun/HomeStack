@@ -70,7 +70,7 @@ func main() {
 	sort.Strings(names)
 	version := strings.TrimPrefix(*tag, "v")
 	validateAssetSet(names, version)
-	artifacts := make([]artifact, 0, 8)
+	artifacts := make([]artifact, 0, 10)
 	for _, name := range names {
 		path := filepath.Join(*dist, name)
 		if err := validateUpdateArchive(path, name); err != nil {
@@ -90,8 +90,8 @@ func main() {
 			writeDetachedSignature(path, signature)
 		}
 	}
-	if len(artifacts) != 8 {
-		fatal(fmt.Errorf("latest.json 必须包含 8 个更新资产，实际为 %d", len(artifacts)))
+	if len(artifacts) != 10 {
+		fatal(fmt.Errorf("latest.json 必须包含 10 个更新资产，实际为 %d", len(artifacts)))
 	}
 	// Wails Endpoint Provider 取同平台/架构的首个资产，桌面载荷必须排在 Agent 之前。
 	sort.SliceStable(artifacts, func(left, right int) bool {
@@ -123,6 +123,8 @@ func validateUpdateArchive(path, name string) error {
 		return validateTarTopLevel(path, "HomeStack.app", "HomeStack.app/Contents/MacOS/HomeStack", false)
 	case strings.HasPrefix(name, "homestack-agent-update_"):
 		return validateTarTopLevel(path, "homestack-agent", "homestack-agent", true)
+	case strings.HasPrefix(name, "homestack-control-update_"):
+		return validateControlUpdateTar(path)
 	case strings.Contains(name, "_windows_") && strings.HasSuffix(name, "_update.zip"):
 		reader, err := zip.OpenReader(path)
 		if err != nil {
@@ -131,6 +133,40 @@ func validateUpdateArchive(path, name string) error {
 		defer reader.Close()
 		if len(reader.File) != 1 || filepath.ToSlash(reader.File[0].Name) != "HomeStack.exe" || reader.File[0].FileInfo().IsDir() {
 			return errors.New("Windows 更新 zip 必须只含单顶层 HomeStack.exe")
+		}
+	}
+	return nil
+}
+
+func validateControlUpdateTar(path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	compressed, err := gzip.NewReader(file)
+	if err != nil {
+		return fmt.Errorf("打开 Control 更新 gzip 失败: %w", err)
+	}
+	defer compressed.Close()
+	reader := tar.NewReader(compressed)
+	expected := map[string]bool{"homestack-control": false, "homestack-config-helper": false}
+	for {
+		header, err := reader.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("读取 Control 更新 tar 失败: %w", err)
+		}
+		if _, ok := expected[header.Name]; !ok || expected[header.Name] || header.Typeflag != tar.TypeReg || header.Size <= 0 {
+			return fmt.Errorf("Control 更新 tar 包含非法条目: %s", header.Name)
+		}
+		expected[header.Name] = true
+	}
+	for name, found := range expected {
+		if !found {
+			return fmt.Errorf("Control 更新 tar 缺少主程序: %s", name)
 		}
 	}
 	return nil
@@ -181,6 +217,7 @@ func validateAssetSet(names []string, version string) {
 	for _, arch := range []string{"amd64", "arm64"} {
 		expected = append(expected,
 			"homestack-control_"+version+"_linux_"+arch+".tar.gz",
+			"homestack-control-update_"+version+"_linux_"+arch+".tar.gz",
 			"homestack-agent_"+version+"_linux_"+arch+".tar.gz",
 			"homestack-agent-update_"+version+"_linux_"+arch+".tar.gz",
 			"HomeStack_"+version+"_darwin_"+arch+".dmg",
@@ -218,6 +255,10 @@ func manifestArtifact(name, version, repository, tag string, size int64, digest,
 		}
 	}
 	for _, arch := range []string{"amd64", "arm64"} {
+		if name == "homestack-control-update_"+version+"_linux_"+arch+".tar.gz" {
+			current.Component, current.Platform, current.Arch, current.Filetype = "control", "linux", arch, "tar.gz"
+			return current, true
+		}
 		if name == "homestack-agent-update_"+version+"_linux_"+arch+".tar.gz" {
 			current.Component, current.Platform, current.Arch, current.Filetype = "agent", "linux", arch, "tar.gz"
 			return current, true

@@ -95,6 +95,12 @@ func handleConnection(connection net.Conn, allowedUID uint32, manager *Manager) 
 			} else {
 				response.Status, response.Error = result(manager.LinkProvider(ctx, request.Provider, *request.Credentials))
 			}
+		case "install_control_update":
+			if request.ControlUpdate == nil {
+				response.Error = "InstallControlUpdate 缺少更新信息"
+			} else if err := manager.InstallControlUpdate(ctx, *request.ControlUpdate); err != nil {
+				response.Error = err.Error()
+			}
 		default:
 			response.Error = "Config Helper 操作不在白名单中"
 		}

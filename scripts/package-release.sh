@@ -23,8 +23,8 @@ if [[ "$component" != "desktop" && "$target_os" != "linux" ]]; then
   echo "Control 与 Agent 只发布 Linux CLI" >&2
   exit 2
 fi
-if [[ "$component" =~ ^(agent|desktop)$ && -z "${HOMESTACK_UPDATE_PUBLIC_KEY:-}" ]]; then
-  echo "Agent 与桌面发布必须通过 HOMESTACK_UPDATE_PUBLIC_KEY 内置 Ed25519 公钥" >&2
+if [[ -z "${HOMESTACK_UPDATE_PUBLIC_KEY:-}" ]]; then
+  echo "Control、Agent 与桌面发布必须通过 HOMESTACK_UPDATE_PUBLIC_KEY 内置 Ed25519 公钥" >&2
   exit 2
 fi
 
@@ -95,6 +95,7 @@ package_cli() {
   fi
   if [[ "$component" == "control" ]]; then
     go build -trimpath -buildvcs=false -ldflags "$ldflags" -o "$install_root/homestack-config-helper" ./cmd/homestack-config-helper
+    verify_version "$install_root/homestack-config-helper" "homestack-config-helper"
   fi
   cp README.md "$install_root/"
   cp -R docs deploy "$install_root/"
@@ -104,6 +105,12 @@ package_cli() {
     mkdir -p "$update_root"
     cp "$binary" "$update_root/homestack-agent"
     tar -C "$update_root" -czf "$output_dir/homestack-agent-update_${version}_linux_${target_arch}.tar.gz" homestack-agent
+  elif [[ "$component" == "control" ]]; then
+    local update_root="$stage/update"
+    mkdir -p "$update_root"
+    cp "$binary" "$update_root/homestack-control"
+    cp "$install_root/homestack-config-helper" "$update_root/homestack-config-helper"
+    tar -C "$update_root" -czf "$output_dir/homestack-control-update_${version}_linux_${target_arch}.tar.gz" homestack-control homestack-config-helper
   fi
 }
 

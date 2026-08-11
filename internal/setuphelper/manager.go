@@ -11,11 +11,13 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/wangshangbin/homestack/internal/buildinfo"
 	setupapi "github.com/wangshangbin/homestack/internal/setup"
 )
 
@@ -40,8 +42,17 @@ type Manager struct {
 	ControlEnv          string
 	TokenPath           string
 	SessionPath         string
+	ControlUpdateRoot   string
+	ControlUpdateWork   string
+	ControlBinary       string
+	ConfigHelperBinary  string
+	UpdatePublicKey     string
+	Platform            string
+	Architecture        string
 	HTTPClient          *http.Client
 	Command             func(context.Context, string, ...string) ([]byte, error)
+	RunVersion          func(context.Context, string) ([]byte, error)
+	HealthCheck         func(context.Context) error
 	Chown               func(string, ...string) error
 	Now                 func() time.Time
 	mu                  sync.Mutex
@@ -53,7 +64,11 @@ func NewManager() *Manager {
 		BackupPath: "/var/lib/homestack-setup/control-env.backup.json", ControlEnv: "/etc/homestack/control.env",
 		MigrationBackupPath: "/etc/homestack/control.env.pre-0.2.1",
 		TokenPath:           "/etc/homestack/setup-token.sha256", SessionPath: "/etc/homestack/setup-session.json",
+		ControlUpdateRoot: "/var/lib/homestack-control/updates", ControlUpdateWork: "/var/lib/homestack-setup/control-updates",
+		ControlBinary: "/usr/local/bin/homestack-control", ConfigHelperBinary: "/usr/local/libexec/homestack-config-helper",
+		UpdatePublicKey: buildinfo.UpdatePublicKey, Platform: runtime.GOOS, Architecture: runtime.GOARCH,
 		HTTPClient: &http.Client{Timeout: 5 * time.Second}, Command: runWhitelistedCommand, Chown: chownFiles, Now: time.Now,
+		RunVersion: runVersionCommand,
 	}
 }
 
@@ -575,11 +590,23 @@ func runWhitelistedCommand(ctx context.Context, name string, arguments ...string
 		}
 	} else if name == "systemd-run" {
 		allowed = joined == "--unit=homestack-control-restart\x00--replace\x00--on-active=2s\x00--property=Type=oneshot\x00systemctl\x00restart\x00homestack-control.service"
+		if len(arguments) == 7 && arguments[0] == "--unit=homestack-control-update" && arguments[1] == "--replace" && arguments[2] == "--on-active=2s" && arguments[3] == "--property=Type=oneshot" && arguments[4] == "/usr/local/libexec/homestack-config-helper" && arguments[5] == "finalize-update" {
+			allowed = strings.HasPrefix(arguments[6], "--transaction=") && isProductionControlUpdateTransaction(strings.TrimPrefix(arguments[6], "--transaction="))
+		}
 	}
 	if !allowed {
 		return nil, fmt.Errorf("命令不在 Config Helper 白名单中: %s %s", name, strings.Join(arguments, " "))
 	}
 	command := exec.CommandContext(ctx, name, arguments...)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", strings.TrimSpace(string(output)), err)
+	}
+	return output, nil
+}
+
+func runVersionCommand(ctx context.Context, path string) ([]byte, error) {
+	command := exec.CommandContext(ctx, path, "--version-json")
 	output, err := command.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", strings.TrimSpace(string(output)), err)

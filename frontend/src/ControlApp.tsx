@@ -1,4 +1,4 @@
-import { ExternalLink, Github, HardDrive, KeyRound, LogOut, Plus, RefreshCw, Settings, Trash2, Unplug } from "lucide-react";
+import { Download, ExternalLink, Github, HardDrive, KeyRound, LogOut, Plus, RefreshCw, RotateCcw, Settings, Trash2, Unplug } from "lucide-react";
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 import { Navigate, NavLink, Route, Routes } from "react-router-dom";
 import { api } from "./api";
@@ -12,6 +12,11 @@ interface Provider { id: OAuthProviderID; label: string }
 interface ControlMetadata { providers: Provider[]; me: Me | null }
 interface ProviderConfiguration extends Provider { configured: boolean; linked: boolean; client_id: string }
 interface SystemConfiguration { public_host: string; providers: ProviderConfiguration[] }
+interface ControlUpdateStatus {
+  state: "idle" | "checking" | "up-to-date" | "available" | "downloading" | "verifying" | "ready" | "installing" | "error";
+  current_version: string; latest_version?: string; published_at?: string; notes?: string;
+  downloaded?: number; total?: number; signature: string; error?: string;
+}
 
 export function ControlApp() {
   const [me, setMe] = useState<Me | null>(null); const [providers, setProviders] = useState<Provider[]>([]);
@@ -28,8 +33,28 @@ export function ControlApp() {
   if (location.pathname === "/login") return <Navigate to="/" replace />;
   async function logout() { try { await api<void>("/auth/logout", { method: "POST" }); location.assign("/"); } catch (reason) { setError(errorMessage(reason)); } }
   const currentProvider = me.identities[0]?.provider;
-  return <div className="control-shell"><header><div className="chrome-brand"><BrandMark className="brand-mark" /><strong>HomeStack</strong><small>Control</small></div><nav><NavLink to="/"><HardDrive size={16} />设备</NavLink><NavLink to="/activate"><Plus size={16} />激活</NavLink><NavLink to="/identity"><KeyRound size={16} />身份</NavLink><NavLink to="/settings/domains"><Settings size={16} />域名</NavLink><button onClick={() => void logout()}><LogOut size={16} />退出</button></nav></header><main><Routes><Route path="/" element={<ControlDevices me={me} />} /><Route path="/activate" element={<ActivationPage />} /><Route path="/identity" element={<IdentityPage me={me} />} /><Route path="/settings/domains" element={<DomainSettings provider={currentProvider ? { id: currentProvider, label: currentProvider === "google" ? "Google" : "GitHub" } : undefined} />} /><Route path="*" element={<ControlDevices me={me} />} /></Routes><Feedback error={error} /></main></div>;
+  return <div className="control-shell"><header><div className="chrome-brand"><BrandMark className="brand-mark" /><strong>HomeStack</strong><small>Control</small></div><nav><NavLink to="/"><HardDrive size={16} />设备</NavLink><NavLink to="/activate"><Plus size={16} />激活</NavLink><NavLink to="/identity"><KeyRound size={16} />身份</NavLink><NavLink to="/settings/domains"><Settings size={16} />域名</NavLink><NavLink to="/settings/updates"><Download size={16} />更新</NavLink><button onClick={() => void logout()}><LogOut size={16} />退出</button></nav></header><main><Routes><Route path="/" element={<ControlDevices me={me} />} /><Route path="/activate" element={<ActivationPage />} /><Route path="/identity" element={<IdentityPage me={me} />} /><Route path="/settings/domains" element={<DomainSettings provider={currentProvider ? { id: currentProvider, label: currentProvider === "google" ? "Google" : "GitHub" } : undefined} />} /><Route path="/settings/updates" element={<ControlUpdates />} /><Route path="*" element={<ControlDevices me={me} />} /></Routes><Feedback error={error} /></main></div>;
 }
+
+export function ControlUpdates() {
+  const [status, setStatus] = useState<ControlUpdateStatus | null>(null); const [busy, setBusy] = useState(false); const [error, setError] = useState("");
+  const load = useCallback(async () => { setStatus(await api<ControlUpdateStatus>("/api/system/updates/status")); }, []);
+  useEffect(() => { void load().catch((reason) => setError(errorMessage(reason))); }, [load]);
+  async function operation(path: "check" | "download" | "install") {
+    setBusy(true); setError("");
+    try {
+      const next = await api<ControlUpdateStatus>(`/api/system/updates/${path}`, { method: "POST", body: "{}" });
+      setStatus(next);
+      if (path === "install") window.setTimeout(() => location.reload(), 5000);
+    } catch (reason) { setError(errorMessage(reason)); }
+    finally { setBusy(false); }
+  }
+  if (!status) return <section className="page"><h1>VPS 更新</h1><CenteredLoader label="读取更新状态" compact /><Feedback error={error} /></section>;
+  const percent = status.total ? Math.min(100, Math.round(((status.downloaded || 0) / status.total) * 100)) : 0;
+  return <section className="page"><h1>VPS 更新</h1><div className="update-grid"><span>当前版本</span><strong>{status.current_version}</strong><span>最新版本</span><strong>{status.latest_version || "-"}</strong><span>状态</span><strong>{controlUpdateLabel(status.state)}</strong><span>签名</span><strong>{status.signature}</strong></div>{status.published_at && <p className="muted">发布于 {new Date(status.published_at).toLocaleString("zh-CN")}</p>}{status.notes && <pre className="release-notes">{status.notes}</pre>}{status.state === "downloading" && <div className="progress"><span style={{ width: `${percent}%` }} /></div>}<div className="button-row"><button className="secondary-button" disabled={busy || status.state === "installing"} onClick={() => void operation("check")}><RefreshCw size={16} />检查更新</button>{status.state === "available" && <button className="primary-button" disabled={busy} onClick={() => void operation("download")}><Download size={16} />下载并校验</button>}{status.state === "ready" && <button className="primary-button" disabled={busy} onClick={() => void operation("install")}><RotateCcw size={16} />安装并重启</button>}</div><Feedback error={error || status.error} /></section>;
+}
+
+function controlUpdateLabel(state: ControlUpdateStatus["state"]) { return ({ idle: "空闲", checking: "检查中", "up-to-date": "已是最新", available: "有更新", downloading: "下载中", verifying: "签名校验中", ready: "可以安装", installing: "正在重启", error: "错误" })[state]; }
 
 function ProviderIcon({ provider }: { provider: OAuthProviderID }) {
   if (provider === "github") return <Github size={21} strokeWidth={2.2} aria-hidden="true" />;

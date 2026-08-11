@@ -27,7 +27,7 @@ ProtectControlGroups=true
 RestrictSUIDSGID=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
-ReadWritePaths=/etc/homestack /var/lib/homestack-setup
+ReadWritePaths=/etc/homestack /var/lib/homestack-setup /usr/local/bin /usr/local/libexec
 
 [Install]
 WantedBy=multi-user.target
