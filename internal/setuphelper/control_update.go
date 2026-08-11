@@ -92,7 +92,7 @@ func (m *Manager) InstallControlUpdate(ctx context.Context, update setupapi.Cont
 		return fmt.Errorf("安装 Config Helper 失败: %w", err)
 	}
 	arguments := []string{
-		"--unit=homestack-control-update", "--replace", "--on-active=2s", "--property=Type=oneshot",
+		"--collect", "--unit=homestack-control-update", "--on-active=2s", "--property=Type=oneshot",
 		m.ConfigHelperBinary, "finalize-update", "--transaction=" + transactionPath,
 	}
 	if _, err := m.Command(ctx, "systemd-run", arguments...); err != nil {

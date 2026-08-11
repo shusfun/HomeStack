@@ -41,7 +41,7 @@ func TestManagerInstallsSignedControlUpdateAndFinalizes(t *testing.T) {
 	if err := manager.FinalizeControlUpdate(t.Context(), transaction); err != nil {
 		t.Fatal(err)
 	}
-	if len(commands) != 4 || !strings.HasPrefix(commands[0], "systemd-run ") || commands[1] != "systemctl restart homestack-control.service" || commands[2] != "systemctl restart homestack-config-helper.service" || commands[3] != "systemctl restart homestack-control.service" {
+	if len(commands) != 4 || !strings.HasPrefix(commands[0], "systemd-run --collect --unit=homestack-control-update ") || strings.Contains(commands[0], "--replace") || commands[1] != "systemctl restart homestack-control.service" || commands[2] != "systemctl restart homestack-config-helper.service" || commands[3] != "systemctl restart homestack-control.service" {
 		t.Fatalf("Control 更新命令错误: %v", commands)
 	}
 	if healthChecks != 2 {

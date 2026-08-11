@@ -274,7 +274,7 @@ func (m *Manager) applyConfiguration(ctx context.Context, config setupapi.Config
 	if _, err := m.Command(ctx, "/usr/local/bin/homestack-control", "configtest", "--env-file", m.ControlEnv); err != nil {
 		return rollback(err)
 	}
-	if _, err := m.Command(ctx, "systemd-run", "--unit=homestack-control-restart", "--replace", "--on-active=2s", "--property=Type=oneshot", "systemctl", "restart", "homestack-control.service"); err != nil {
+	if _, err := m.Command(ctx, "systemd-run", "--collect", "--unit=homestack-control-restart", "--on-active=2s", "--property=Type=oneshot", "systemctl", "restart", "homestack-control.service"); err != nil {
 		return rollback(err)
 	}
 	public := setupapi.PublicConfigurationFor(config)
@@ -589,8 +589,8 @@ func runWhitelistedCommand(ctx context.Context, name string, arguments ...string
 			}
 		}
 	} else if name == "systemd-run" {
-		allowed = joined == "--unit=homestack-control-restart\x00--replace\x00--on-active=2s\x00--property=Type=oneshot\x00systemctl\x00restart\x00homestack-control.service"
-		if len(arguments) == 7 && arguments[0] == "--unit=homestack-control-update" && arguments[1] == "--replace" && arguments[2] == "--on-active=2s" && arguments[3] == "--property=Type=oneshot" && arguments[4] == "/usr/local/libexec/homestack-config-helper" && arguments[5] == "finalize-update" {
+		allowed = joined == "--collect\x00--unit=homestack-control-restart\x00--on-active=2s\x00--property=Type=oneshot\x00systemctl\x00restart\x00homestack-control.service"
+		if len(arguments) == 7 && arguments[0] == "--collect" && arguments[1] == "--unit=homestack-control-update" && arguments[2] == "--on-active=2s" && arguments[3] == "--property=Type=oneshot" && arguments[4] == "/usr/local/libexec/homestack-config-helper" && arguments[5] == "finalize-update" {
 			allowed = strings.HasPrefix(arguments[6], "--transaction=") && isProductionControlUpdateTransaction(strings.TrimPrefix(arguments[6], "--transaction="))
 		}
 	}
