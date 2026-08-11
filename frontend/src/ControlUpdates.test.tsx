@@ -3,7 +3,7 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { describe, expect, it, vi } from "vitest";
-import { ControlUpdates } from "./ControlApp";
+import { ControlUpdates, waitForControlHealth } from "./ControlApp";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -22,6 +22,24 @@ describe("ControlUpdates", () => {
     expect(container.textContent).toContain("下载并校验");
     expect(fetch).toHaveBeenNthCalledWith(2, "/api/system/updates/check", expect.objectContaining({ method: "POST", credentials: "same-origin" }));
     await act(async () => root.unmount());
+    vi.unstubAllGlobals();
+  });
+
+  it("等待目标版本健康后才刷新", async () => {
+    vi.useFakeTimers();
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ status: "ok" }))
+      .mockResolvedValueOnce(jsonResponse({ surface: "control", version: "1.2.3" }))
+      .mockResolvedValueOnce(jsonResponse({ status: "ok" }))
+      .mockResolvedValueOnce(jsonResponse({ surface: "control", version: "1.2.4" }));
+    vi.stubGlobal("fetch", fetch);
+    const onRecovered = vi.fn();
+    const waiting = waitForControlHealth("1.2.4", onRecovered);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await waiting;
+    expect(onRecovered).toHaveBeenCalledOnce();
+    expect(fetch.mock.calls.map(([url]) => url)).toEqual(["/api/health", "/api/meta", "/api/health", "/api/meta"]);
+    vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 });

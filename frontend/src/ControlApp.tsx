@@ -65,7 +65,10 @@ export function ControlUpdates() {
     try {
       const next = await api<ControlUpdateStatus>(`/api/system/updates/${path}`, { method: "POST", body: "{}" });
       setStatus(next);
-      if (path === "install") await waitForControlHealth();
+      if (path === "install") {
+        if (!next.latest_version) throw new Error("Control 更新响应缺少目标版本");
+        await waitForControlHealth(next.latest_version, () => location.reload());
+      }
     } catch (reason) { setError(errorMessage(reason)); }
     finally { setBusy(false); }
   }
@@ -74,14 +77,24 @@ export function ControlUpdates() {
   return <Page title="VPS 更新"><div className="update-grid"><span>当前版本</span><strong>{status.current_version}</strong><span>最新版本</span><strong>{status.latest_version || "-"}</strong><span>状态</span><strong>{controlUpdateLabel(status.state)}</strong><span>签名</span><strong>{status.signature}</strong></div>{status.published_at && <p className="muted">发布于 {new Date(status.published_at).toLocaleString("zh-CN")}</p>}{status.notes && <ScrollArea className="release-notes">{status.notes}</ScrollArea>}{status.state === "downloading" && <Progress label="更新下载进度" value={percent} />}{status.state === "installing" && <InlineNotice>Control 正在重启，服务恢复后页面会自动刷新。</InlineNotice>}<div className="button-row"><Button disabled={busy || status.state === "installing"} loading={busy && status.state !== "available" && status.state !== "ready"} onClick={() => void operation("check")} tone="default" variant="outline"><RefreshCw size={16} />检查更新</Button>{status.state === "available" && <Button disabled={busy} loading={busy} onClick={() => void operation("download")}><Download size={16} />下载并校验</Button>}{status.state === "ready" && <Button disabled={busy} loading={busy} onClick={() => void operation("install")}><RotateCcw size={16} />安装并重启</Button>}</div>{(error || status.error) && <InlineNotice tone="danger">{error || status.error}</InlineNotice>}</Page>;
 }
 
-async function waitForControlHealth() {
+export async function waitForControlHealth(expectedVersion: string, onRecovered: () => void) {
   const deadline = Date.now() + 90_000;
   let lastError = "Control 尚未恢复";
   while (Date.now() < deadline) {
     try {
-      const response = await fetch("/api/health", { cache: "no-store", credentials: "same-origin" });
-      if (response.ok && response.headers.get("content-type")?.includes("application/json")) { location.reload(); return; }
-      lastError = `健康接口返回 HTTP ${response.status}`;
+      const health = await fetch("/api/health", { cache: "no-store", credentials: "same-origin" });
+      if (!health.ok || !health.headers.get("content-type")?.includes("application/json")) {
+        lastError = `健康接口返回 HTTP ${health.status}`;
+      } else {
+        const metadata = await fetch("/api/meta", { cache: "no-store", credentials: "same-origin" });
+        if (!metadata.ok || !metadata.headers.get("content-type")?.includes("application/json")) {
+          lastError = `元数据接口返回 HTTP ${metadata.status}`;
+        } else {
+          const value = await metadata.json() as { version?: unknown };
+          if (value.version === expectedVersion) { onRecovered(); return; }
+          lastError = `Control 当前版本为 ${String(value.version || "未知")}，等待 ${expectedVersion}`;
+        }
+      }
     } catch (reason) { lastError = errorMessage(reason); }
     await new Promise((resolve) => window.setTimeout(resolve, 1000));
   }
