@@ -271,6 +271,11 @@ jobs:
         shell: bash
         run: go mod download
 
+      - name: Windows 桌面端测试
+        if: matrix.os == 'windows'
+        shell: bash
+        run: go test -p=2 -parallel=2 ./internal/desktop
+
       - name: 构建共享前端
         shell: bash
         run: pnpm --dir frontend build

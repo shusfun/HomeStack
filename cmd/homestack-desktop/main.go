@@ -17,6 +17,11 @@ import (
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "--node" {
+		releaseNodeInstance, err := desktop.AcquireNodeInstance()
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer releaseNodeInstance()
 		if err := desktop.ConfigureNodeEnvironment(); err != nil {
 			log.Fatal(err)
 		}

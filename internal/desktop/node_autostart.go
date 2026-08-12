@@ -66,10 +66,16 @@ func ConfigureNodeAutostart() error {
 }
 
 func RepairNodeAutostart() error {
-	if runtime.GOOS != "darwin" {
-		return nil
+	if runtime.GOOS == "darwin" {
+		return ConfigureNodeAutostart()
 	}
-	return ConfigureNodeAutostart()
+	if runtime.GOOS == "windows" {
+		if err := ConfigureNodeAutostart(); err != nil {
+			return err
+		}
+		return RestartNode()
+	}
+	return nil
 }
 
 func RestartNode() error {
@@ -82,10 +88,15 @@ func RestartNode() error {
 	case "linux":
 		return runStartupCommand("systemctl", "--user", "restart", "homestack-node.service")
 	case "windows":
-		if err := runStartupCommand("schtasks", "/End", "/TN", "HomeStackNode"); err != nil {
+		executable, err := os.Executable()
+		if err != nil {
+			return fmt.Errorf("定位 HomeStack App 失败: %w", err)
+		}
+		executable, err = filepath.Abs(executable)
+		if err != nil {
 			return err
 		}
-		return runStartupCommand("schtasks", "/Run", "/TN", "HomeStackNode")
+		return restartWindowsNode(executable)
 	default:
 		return fmt.Errorf("不支持的 Node 重启平台: %s", runtime.GOOS)
 	}
@@ -200,14 +211,6 @@ func configureSystemdUser(executable string) error {
 		return err
 	}
 	return runStartupCommand("systemctl", "--user", "enable", "--now", "homestack-node.service")
-}
-
-func configureWindowsStartup(executable string) error {
-	command := `"` + strings.ReplaceAll(executable, `"`, `\"`) + `" --node`
-	if err := runStartupCommand("schtasks", "/Create", "/SC", "ONLOGON", "/TN", "HomeStackNode", "/TR", command, "/F"); err != nil {
-		return err
-	}
-	return runStartupCommand("schtasks", "/Run", "/TN", "HomeStackNode")
 }
 
 func nodeStateDirectory() (string, error) {
