@@ -21,16 +21,15 @@ type FileItem struct {
 	Size     int64     `json:"size"`
 	Modified time.Time `json:"modified"`
 	Type     string    `json:"type"`
+	Path     string    `json:"path,omitempty"`
 }
 type FileResource struct {
 	FileItem
-	Path    string     `json:"path"`
 	Files   []FileItem `json:"files"`
 	Folders []FileItem `json:"folders"`
 }
 type FileSearchResult struct {
 	FileItem
-	Path string `json:"path"`
 }
 
 func NewFileService(directories []protocol.SharedDirectory) *FileService {
@@ -68,11 +67,11 @@ func (s *FileService) List(virtual string) (FileResource, error) {
 	virtual = cleanVirtual(virtual)
 	if virtual == "/" {
 		folders := make([]FileItem, 0, len(s.roots))
-		for _, root := range s.roots {
-			folders = append(folders, FileItem{Name: root.Name, Type: "directory"})
+		for id, root := range s.roots {
+			folders = append(folders, FileItem{Name: root.Name, Type: "directory", Path: "/" + id})
 		}
 		sort.Slice(folders, func(i, j int) bool { return folders[i].Name < folders[j].Name })
-		return FileResource{FileItem: FileItem{Name: "共享目录", Type: "directory"}, Path: "/", Files: []FileItem{}, Folders: folders}, nil
+		return FileResource{FileItem: FileItem{Name: "共享目录", Type: "directory", Path: "/"}, Files: []FileItem{}, Folders: folders}, nil
 	}
 	path, info, err := s.resolve(virtual)
 	if err != nil {
@@ -85,7 +84,8 @@ func (s *FileService) List(virtual string) (FileResource, error) {
 	if err != nil {
 		return FileResource{}, err
 	}
-	resource := FileResource{FileItem: fileItem(info), Path: virtual, Files: []FileItem{}, Folders: []FileItem{}}
+	resource := FileResource{FileItem: fileItem(info), Files: []FileItem{}, Folders: []FileItem{}}
+	resource.Path = virtual
 	for _, entry := range entries {
 		if strings.HasPrefix(entry.Name(), ".") || entry.Type()&os.ModeSymlink != 0 {
 			continue
@@ -152,7 +152,9 @@ func (s *FileService) Search(query string, limit int) ([]FileSearchResult, error
 			if err != nil {
 				return err
 			}
-			results = append(results, FileSearchResult{FileItem: fileItem(info), Path: "/" + id + "/" + filepath.ToSlash(relative)})
+			item := fileItem(info)
+			item.Path = "/" + id + "/" + filepath.ToSlash(relative)
+			results = append(results, FileSearchResult{FileItem: item})
 			return nil
 		})
 		if err != nil {

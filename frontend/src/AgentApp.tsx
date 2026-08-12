@@ -40,12 +40,15 @@ function Files() {
   const load = useCallback(async (target: string) => { setError(""); setResults(null); try { setResource(await api<FileResource>(`/api/files/resources?path=${encodeURIComponent(target)}`)); setPath(target); } catch (reason) { setError(errorMessage(reason)); } }, []);
   useEffect(() => { void load("/"); }, [load]);
   const parent = useMemo(() => path === "/" ? "/" : path.split("/").slice(0, -1).join("/") || "/", [path]);
-  const child = (name: string) => `${path === "/" ? "" : path}/${name}`;
-  const itemPath = (item: FileItem) => item.path || child(item.name);
+  const itemPath = (item: FileItem) => resolveFileItemPath(path, item);
   function activate(item: FileItem) { if (item.type === "directory") void load(itemPath(item)); else setPreview(itemPath(item)); }
   async function search() { setError(""); if (!query.trim()) { await load(path); return; } try { setResults((await api<{ items: FileItem[] }>(`/api/files/search?q=${encodeURIComponent(query.trim())}&limit=100`)).items); } catch (reason) { setError(errorMessage(reason)); } }
   const items = results || [...(resource?.folders || []), ...(resource?.files || [])];
   return <AgentPage title="文件" action={<IconButton label="刷新文件" onClick={() => void load(path)}><RefreshCw size={16} /></IconButton>}><div className="file-toolbar"><div className="pathbar"><IconButton disabled={path === "/" || results !== null} label="上一级" onClick={() => void load(parent)}><ChevronLeft size={17} /></IconButton><code>{results ? `搜索：${query}` : path}</code></div><div className="file-search"><Input value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void search(); }} aria-label="搜索文件" /><IconButton label="搜索" onClick={() => void search()}><Search size={17} /></IconButton></div></div><ScrollArea className="file-table">{items.map((item) => <div className="file-row" key={`${item.type}-${itemPath(item)}`}><Button className="file-entry-button" onClick={() => activate(item)} variant="ghost"><span>{item.type === "directory" ? <Folder size={17} /> : <File size={17} />}<strong>{item.name}</strong></span></Button><span>{item.type === "directory" ? "文件夹" : formatBytes(item.size)}</span><span>{formatTime(item.modified)}</span>{item.type !== "directory" && <div className="file-actions"><IconButton label={`预览 ${item.name}`} onClick={() => setPreview(itemPath(item))}><Eye size={16} /></IconButton><IconButton asChild label={`下载 ${item.name}`}><a href={`/api/files/raw?files=${encodeURIComponent(itemPath(item))}&download=1`}><Download size={16} /></a></IconButton></div>}</div>)}</ScrollArea>{items.length === 0 && !error && <EmptyState icon={<FolderOpen size={24} />} title={results ? "没有匹配文件" : "目录为空"} />}{!resource && !error && <Loading label="读取文件" compact />}{error && <InlineNotice tone="danger">{error}</InlineNotice>}{preview && <FilePreview path={preview} onClose={() => setPreview("")} />}</AgentPage>;
+}
+
+export function resolveFileItemPath(currentPath: string, item: Pick<FileItem, "name" | "path">): string {
+  return item.path || `${currentPath === "/" ? "" : currentPath}/${item.name}`;
 }
 
 function FilePreview({ path, onClose }: { path: string; onClose: () => void }) {

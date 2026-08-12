@@ -50,3 +50,21 @@ func TestFileServiceSearchSkipsHiddenFiles(t *testing.T) {
 		t.Fatalf("搜索结果包含隐藏文件或路径错误: %+v", results)
 	}
 }
+
+func TestFileServiceRootUsesDirectoryIDAsVirtualPath(t *testing.T) {
+	service := NewFileService([]protocol.SharedDirectory{{ID: "downloads", Name: "下载", Path: t.TempDir()}})
+	resource, err := service.List("/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resource.Folders) != 1 {
+		t.Fatalf("根目录数量错误: %+v", resource.Folders)
+	}
+	folder := resource.Folders[0]
+	if folder.Name != "下载" || folder.Path != "/downloads" {
+		t.Fatalf("显示名称与虚拟路径未正确解耦: %+v", folder)
+	}
+	if _, err := service.List(folder.Path); err != nil {
+		t.Fatalf("服务端返回的虚拟路径无法访问: %v", err)
+	}
+}
