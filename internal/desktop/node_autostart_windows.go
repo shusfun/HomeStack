@@ -136,7 +136,7 @@ func terminateWindowsNode(pid uint32, expectedExecutable string) error {
 		return fmt.Errorf("读取占用端口 19444 的进程路径失败，PID=%d: %w", pid, err)
 	}
 	actualExecutable := filepath.Clean(windows.UTF16ToString(pathBuffer[:pathLength]))
-	if !strings.EqualFold(actualExecutable, filepath.Clean(expectedExecutable)) {
+	if !isManagedWindowsNodeExecutable(expectedExecutable, actualExecutable) {
 		return fmt.Errorf("端口 19444 被其他程序占用，PID=%d，路径=%s", pid, actualExecutable)
 	}
 	descendants, err := windowsProcessDescendants(pid)
@@ -152,6 +152,29 @@ func terminateWindowsNode(pid uint32, expectedExecutable string) error {
 		return fmt.Errorf("停止旧 HomeStack Node 失败，PID=%d: %w", pid, err)
 	}
 	return nil
+}
+
+func isManagedWindowsNodeExecutable(expectedExecutable, actualExecutable string) bool {
+	expected := filepath.Clean(strings.TrimSpace(expectedExecutable))
+	actual := filepath.Clean(strings.TrimSpace(actualExecutable))
+	if strings.EqualFold(actual, expected) {
+		return true
+	}
+	if !strings.EqualFold(filepath.Dir(actual), filepath.Dir(expected)) {
+		return false
+	}
+	expectedName := filepath.Base(expected)
+	actualName := filepath.Base(actual)
+	prefix := expectedName + ".old."
+	if len(actualName) <= len(prefix) || !strings.EqualFold(actualName[:len(prefix)], prefix) {
+		return false
+	}
+	for _, character := range actualName[len(prefix):] {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func windowsProcessDescendants(root uint32) ([]uint32, error) {
