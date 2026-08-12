@@ -3,6 +3,7 @@ package desktop
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -38,6 +39,9 @@ func TestFileSHA256ChangesWithExecutableContent(t *testing.T) {
 }
 
 func TestPrepareNodeLogsRestrictsPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows 不提供 POSIX 文件权限语义")
+	}
 	home := t.TempDir()
 	stdoutPath, stderrPath, err := prepareNodeLogs(home)
 	if err != nil {
@@ -62,6 +66,9 @@ func TestPrepareNodeLogsRestrictsPermissions(t *testing.T) {
 }
 
 func TestSameUserFileChecksContentAndPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows 不提供 POSIX 文件权限语义")
+	}
 	path := filepath.Join(t.TempDir(), "node.plist")
 	content := []byte("node")
 	if err := os.WriteFile(path, content, 0o600); err != nil {

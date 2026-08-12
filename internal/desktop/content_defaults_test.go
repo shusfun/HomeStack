@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -61,6 +62,9 @@ func TestDiscoverDefaultDirectoriesReturnsRealStatError(t *testing.T) {
 }
 
 func TestDiscoverDefaultDirectoriesRejectsHomeHiddenAndSystemTargets(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("该测试验证 Unix 系统目录规则")
+	}
 	home := t.TempDir()
 	for _, name := range []string{"Desktop", "Downloads", "Movies"} {
 		if err := os.Mkdir(filepath.Join(home, name), 0o700); err != nil {
